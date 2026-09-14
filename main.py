@@ -37,6 +37,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import alertas
 import modbus
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -106,6 +107,7 @@ def init_db() -> None:
                 descripcion TEXT
             )
         """)
+        alertas.preparar_tablas(con)
 
 
 # --- Extracción de valores ---------------------------------------------------
@@ -195,6 +197,32 @@ def extraer(payload: Any) -> dict:
     return resultado
 
 
+# --- Alarmas -----------------------------------------------------------------
+
+MUDA_MIN = float(os.environ.get("MUDA_MIN", "10") or 10)
+
+
+def _procesar_alarmas(dispositivo: Optional[str], od: Optional[float]) -> None:
+    """Evalúa umbrales tras guardar una lectura y despacha notificaciones."""
+    nombre = dispositivo or "sonda"
+    with _lock, db() as con:
+        avisos = alertas.evaluar_lectura(con, nombre, od, datetime.now(timezone.utc))
+    for texto in avisos:
+        threading.Thread(target=alertas.notificar_telegram, args=(texto,), daemon=True).start()
+
+
+async def _vigilar_mudas() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            with _lock, db() as con:
+                avisos = alertas.revisar_mudas(con, datetime.now(timezone.utc), MUDA_MIN)
+            for texto in avisos:
+                threading.Thread(target=alertas.notificar_telegram, args=(texto,), daemon=True).start()
+        except Exception as e:
+            print(f"alarmas: error vigilando mudas: {e}")
+
+
 # --- Colector Modbus TCP -----------------------------------------------------
 
 MODBUS_TCP_PORT = int(os.environ.get("MODBUS_TCP_PORT", "0") or 0)
@@ -221,6 +249,7 @@ async def guardar_lectura_modbus(campos: dict, dispositivo: Optional[str]) -> No
                 payload,
             ),
         )
+    _procesar_alarmas(dispositivo, campos.get("oxigeno_disuelto"))
 
 
 async def _arrancar_modbus() -> None:
@@ -241,6 +270,7 @@ async def _arrancar_modbus() -> None:
 @app.on_event("startup")
 async def _startup():
     init_db()
+    asyncio.ensure_future(_vigilar_mudas())
     if MODBUS_TCP_PORT:
         await _arrancar_modbus()
 
@@ -285,22 +315,28 @@ async def webhook(request: Request, token: str = Query(default="")):
             ),
         )
 
+    _procesar_alarmas(campos["dispositivo"], campos["oxigeno_disuelto"])
     return {"ok": True, "recibido_en": ahora, "extraido": campos}
 
 
 SQL_ULTIMA_VALIDA = """
     SELECT * FROM lecturas
-    WHERE oxigeno_disuelto IS NOT NULL
-       OR temperatura IS NOT NULL
-       OR saturacion IS NOT NULL
+    WHERE (oxigeno_disuelto IS NOT NULL
+        OR temperatura IS NOT NULL
+        OR saturacion IS NOT NULL)
     ORDER BY id DESC LIMIT 1
 """
 
 
 @app.get("/api/latest")
-def latest():
+def latest(dispositivo: str = Query(default="")):
+    sql = SQL_ULTIMA_VALIDA
+    params: list = []
+    if dispositivo:
+        sql = sql.replace("ORDER BY", "AND dispositivo = ? ORDER BY")
+        params.append(dispositivo)
     with db() as con:
-        fila = con.execute(SQL_ULTIMA_VALIDA).fetchone()
+        fila = con.execute(sql, params).fetchone()
     if not fila:
         return JSONResponse({"error": "todavía no llega ninguna lectura"}, status_code=404)
     d = dict(fila)
@@ -309,12 +345,18 @@ def latest():
 
 
 @app.get("/api/readings")
-def readings(limit: int = Query(default=100, ge=1, le=20000), since: str = Query(default="")):
+def readings(limit: int = Query(default=100, ge=1, le=20000), since: str = Query(default=""),
+             dispositivo: str = Query(default="")):
     sql = "SELECT id, recibido_en, medido_en, dispositivo, oxigeno_disuelto, temperatura, saturacion FROM lecturas"
-    params: list = []
+    condiciones, params = [], []
     if since:
-        sql += " WHERE recibido_en >= ?"
+        condiciones.append("recibido_en >= ?")
         params.append(since)
+    if dispositivo:
+        condiciones.append("dispositivo = ?")
+        params.append(dispositivo)
+    if condiciones:
+        sql += " WHERE " + " AND ".join(condiciones)
     sql += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
 
@@ -383,6 +425,10 @@ PAGINA = """<!doctype html>
   .ejey, .ejex { font-size:10px; fill:var(--tinta2); }
   .cruz { stroke:var(--tinta2); stroke-width:1; stroke-dasharray:3 3; }
   .vacio { font-size:.9rem; color:var(--tinta2); padding:1.6rem 0; text-align:center; }
+  #alarmas { border:1px solid #e34948; background:rgba(227,73,72,.1); border-radius:.6rem;
+             padding:.7rem 1rem; margin-bottom:1rem; font-size:.88rem; line-height:1.8; }
+  #alarmas strong { color:#e34948; }
+  @media (prefers-color-scheme: dark) { #alarmas strong { color:#e66767; } #alarmas { border-color:#e66767; } }
   #tooltip { position:fixed; pointer-events:none; background:var(--tarjeta); color:var(--tinta);
              border:1px solid var(--borde); border-radius:.45rem; padding:.5rem .7rem;
              font-size:.78rem; line-height:1.6; box-shadow:0 2px 10px rgba(0,0,0,.12);
@@ -421,6 +467,10 @@ PAGINA = """<!doctype html>
 <body>
   <h1>Sonda de oxígeno disuelto</h1>
 
+  <div id="alarmas" hidden></div>
+
+  <div class="rangos" id="piscinas" hidden><span>Piscina:</span></div>
+
   <div class="grid" id="tarjetas">
     <div class="tarjeta"><h2><span class="punto" style="background:var(--s-od)"></span>Oxígeno disuelto</h2>
       <p class="valor" id="v-od">—<span>mg/L</span></p></div>
@@ -437,6 +487,8 @@ PAGINA = """<!doctype html>
     <button data-rango="1" class="activo">1 h</button>
     <button data-rango="6">6 h</button>
     <button data-rango="24">24 h</button>
+    <button id="btn-umbrales" style="margin-left:auto"
+            title="Umbrales de alarma de oxígeno de la piscina seleccionada">⚙ Umbrales</button>
   </div>
 
   <div class="bloque"><header>
@@ -472,6 +524,14 @@ PAGINA = """<!doctype html>
     </table></div>
   </details>
 
+  <details>
+    <summary>Historial de alarmas</summary>
+    <div class="tabla-scroll"><table>
+      <thead><tr><th>Piscina</th><th>Tipo</th><th>Valor</th><th>Inició</th><th>Resuelta</th></tr></thead>
+      <tbody id="tabla-alarmas"></tbody>
+    </table></div>
+  </details>
+
   <div id="tooltip" hidden></div>
 
   <noscript><p class="vacio">Esta página necesita JavaScript; usa <a href="/api/latest">/api/latest</a>.</p></noscript>
@@ -493,13 +553,16 @@ const SERIES = [
 let rangoHoras = 1;
 let datos = [];            // ascendente en el tiempo
 let ultimaCarga = null;
+let piscina = "";          // dispositivo seleccionado ("" = el único / todos)
+try { piscina = localStorage.getItem("piscina_panel") || ""; } catch (e) {}
 
 const fmtHora = t => t.toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
 
 async function cargar() {
   const desde = new Date(Date.now() - rangoHoras * 3600e3).toISOString();
   try {
-    const r = await fetch(`/api/readings?limit=20000&since=${encodeURIComponent(desde)}`);
+    const r = await fetch(`/api/readings?limit=20000&since=${encodeURIComponent(desde)}` +
+      (piscina ? `&dispositivo=${encodeURIComponent(piscina)}` : ""));
     const j = await r.json();
     datos = (j.lecturas || []).filter(l =>
       l.oxigeno_disuelto !== null || l.temperatura !== null || l.saturacion !== null
@@ -751,6 +814,7 @@ async function cargarDispositivos() {
       `<button class="popup-quitar" data-quitar="${encodeURIComponent(d.nombre)}">🗑 Quitar del mapa</button></div>`
     ).addTo(marcadores);
   }
+  pintarPiscinas();
   const sinUbicar = dispositivos.filter(d => d.lat === null);
   if (sinUbicar.length && !ubicando) {
     document.getElementById("mapa-nota").textContent =
@@ -761,6 +825,79 @@ async function cargarDispositivos() {
     mapa.fitBounds(L.latLngBounds(puestos.map(d => [d.lat, d.lng])).pad(0.4), { maxZoom: 15 });
   }
 }
+
+// --- Alarmas -----------------------------------------------------------------
+const NOMBRE_TIPO = { od_bajo: "🟠 Oxígeno bajo", od_critico: "🔴 Oxígeno CRÍTICO", sin_datos: "🔕 Sin datos" };
+
+async function cargarAlarmas() {
+  let j;
+  try { j = await (await fetch("/api/alarmas")).json(); } catch (e) { return; }
+  const banner = document.getElementById("alarmas");
+  if (j.activas.length) {
+    banner.hidden = false;
+    banner.innerHTML = "<strong>⚠ Alarma activa</strong><br>" + j.activas.map(a =>
+      `${NOMBRE_TIPO[a.tipo] || a.tipo} en <strong>${a.dispositivo}</strong>` +
+      (a.valor !== null ? ` — ${a.valor.toFixed(2)} mg/L` : "") +
+      ` (desde ${new Date(a.iniciada_en).toLocaleTimeString("es")})`
+    ).join("<br>");
+  } else {
+    banner.hidden = true;
+  }
+  document.getElementById("tabla-alarmas").innerHTML = j.historial.slice(0, 20).map(a =>
+    `<tr><td>${a.dispositivo}</td><td>${NOMBRE_TIPO[a.tipo] || a.tipo}</td>` +
+    `<td>${a.valor !== null ? a.valor.toFixed(2) : "—"}</td>` +
+    `<td>${new Date(a.iniciada_en).toLocaleString("es")}</td>` +
+    `<td>${a.resuelta_en ? new Date(a.resuelta_en).toLocaleString("es") : "activa"}</td></tr>`
+  ).join("") || '<tr><td colspan="5">Sin alarmas registradas.</td></tr>';
+}
+
+document.getElementById("btn-umbrales").addEventListener("click", async () => {
+  const nombre = piscina || (dispositivos.find(d => d.ultima) || dispositivos[0] || {}).nombre;
+  if (!nombre) { alert("Todavía no hay ninguna sonda reportando."); return; }
+  let u = { od_aviso: 4, od_critico: 3 };
+  try { u = await (await fetch(`/api/umbrales/${encodeURIComponent(nombre)}`)).json(); } catch (e) {}
+  const aviso = parseFloat(prompt(`Umbral de AVISO para «${nombre}» (mg/L):`, u.od_aviso));
+  if (isNaN(aviso)) return;
+  const critico = parseFloat(prompt(`Umbral CRÍTICO para «${nombre}» (mg/L):`, u.od_critico));
+  if (isNaN(critico)) return;
+  const token = localStorage.getItem("token_panel") || prompt("Token de la app (AUTH_TOKEN):") || "";
+  const r = await fetch(`/api/umbrales/${encodeURIComponent(nombre)}?token=${encodeURIComponent(token)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ od_aviso: aviso, od_critico: critico }),
+  });
+  if (r.status === 401) { localStorage.removeItem("token_panel"); alert("Token inválido."); return; }
+  if (!r.ok) { alert((await r.json()).detail || "No se pudo guardar."); return; }
+  try { localStorage.setItem("token_panel", token); } catch (e) {}
+  alert(`Umbrales de «${nombre}»: aviso < ${aviso} mg/L, crítico < ${critico} mg/L`);
+});
+
+function pintarPiscinas() {
+  const cont = document.getElementById("piscinas");
+  const nombres = dispositivos.filter(d => d.ultima).map(d => d.nombre);
+  if (nombres.length < 2) {           // una sola sonda: sin selector
+    cont.hidden = true;
+    if (piscina && !nombres.includes(piscina)) { piscina = ""; }
+    return;
+  }
+  if (!nombres.includes(piscina)) {
+    piscina = nombres[0];
+    try { localStorage.setItem("piscina_panel", piscina); } catch (e) {}
+  }
+  cont.hidden = false;
+  cont.innerHTML = "<span>Piscina:</span>" + nombres.map(n =>
+    `<button data-piscina="${encodeURIComponent(n)}" class="${n === piscina ? "activo" : ""}">` +
+    `${(dispositivos.find(d => d.nombre === n) || {}).descripcion || n}</button>`
+  ).join("");
+}
+
+document.getElementById("piscinas").addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-piscina]");
+  if (!b) return;
+  piscina = decodeURIComponent(b.dataset.piscina);
+  try { localStorage.setItem("piscina_panel", piscina); } catch (e) {}
+  pintarPiscinas();
+  cargar();
+});
 
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("[data-quitar]");
@@ -786,7 +923,8 @@ addEventListener("resize", () => { if (datos.length) render(); });
 iniciarMapa();
 cargar();
 cargarDispositivos();
-setInterval(() => { cargar(); cargarDispositivos(); }, 10000);
+cargarAlarmas();
+setInterval(() => { cargar(); cargarDispositivos(); cargarAlarmas(); }, 10000);
 </script>
 </body></html>"""
 
@@ -846,6 +984,38 @@ async def ubicar_dispositivo(nombre: str, request: Request, token: str = Query(d
             (nombre, lat, lng, descripcion),
         )
     return {"ok": True, "nombre": nombre, "lat": lat, "lng": lng}
+
+
+@app.get("/api/alarmas")
+def api_alarmas(limit: int = Query(default=50, ge=1, le=500)):
+    with db() as con:
+        return {"activas": alertas.alarmas_activas(con),
+                "historial": alertas.historial(con, limit)}
+
+
+@app.get("/api/umbrales/{nombre}")
+def api_umbrales(nombre: str):
+    with db() as con:
+        return alertas.umbrales_de(con, nombre)
+
+
+@app.put("/api/umbrales/{nombre}")
+async def fijar_umbrales(nombre: str, request: Request, token: str = Query(default="")):
+    if AUTH_TOKEN:
+        entregado = token or request.headers.get("X-Auth-Token", "")
+        if entregado != AUTH_TOKEN:
+            raise HTTPException(status_code=401, detail="token inválido")
+    cuerpo = await request.json()
+    try:
+        od_aviso = float(cuerpo["od_aviso"])
+        od_critico = float(cuerpo["od_critico"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="od_aviso y od_critico numéricos requeridos")
+    if od_critico > od_aviso:
+        raise HTTPException(status_code=422, detail="od_critico debe ser <= od_aviso")
+    with _lock, db() as con:
+        alertas.fijar_umbrales(con, nombre, od_aviso, od_critico)
+    return {"ok": True, "od_aviso": od_aviso, "od_critico": od_critico}
 
 
 @app.delete("/api/dispositivos/{nombre}")

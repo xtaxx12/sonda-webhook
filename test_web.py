@@ -127,3 +127,116 @@ def test_quitar_conserva_las_lecturas(cliente):
     assert lista[0]["nombre"] == "sonda-1"
     assert lista[0]["lat"] is None
     assert lista[0]["ultima"]["temperatura"] == pytest.approx(26.9)
+
+
+# --- Multi-sonda -------------------------------------------------------------
+
+def _lectura(cliente, nombre, temp, od=5.0):
+    cliente.post("/usr/webhook?token=prueba",
+                 json={"deviceName": nombre, "Temperature": temp,
+                       "Dissolved_Oxygen": od, "DO_Saturation": 60.0})
+
+
+def test_latest_filtra_por_dispositivo(cliente):
+    _lectura(cliente, "piscina-1", 26.0)
+    _lectura(cliente, "piscina-2", 29.0)
+    r = cliente.get("/api/latest?dispositivo=piscina-1").json()
+    assert r["dispositivo"] == "piscina-1"
+    assert r["temperatura"] == pytest.approx(26.0)
+    # Sin filtro devuelve la más reciente de todas.
+    assert cliente.get("/api/latest").json()["dispositivo"] == "piscina-2"
+
+
+def test_readings_filtra_por_dispositivo(cliente):
+    _lectura(cliente, "piscina-1", 26.0)
+    _lectura(cliente, "piscina-2", 29.0)
+    _lectura(cliente, "piscina-1", 26.5)
+    j = cliente.get("/api/readings?dispositivo=piscina-1").json()
+    assert j["total"] == 2
+    assert all(l["dispositivo"] == "piscina-1" for l in j["lecturas"])
+
+
+def test_home_tiene_selector_de_piscina(cliente):
+    assert 'id="piscinas"' in cliente.get("/").text
+
+
+# --- Alarmas integradas ------------------------------------------------------
+
+def test_lectura_baja_crea_alarma(cliente):
+    _lectura(cliente, "piscina-1", 27.0, od=3.2)
+    j = cliente.get("/api/alarmas").json()
+    assert len(j["activas"]) == 1
+    assert j["activas"][0]["tipo"] == "od_bajo"
+    assert j["activas"][0]["dispositivo"] == "piscina-1"
+
+
+def test_lectura_normal_resuelve_alarma(cliente):
+    _lectura(cliente, "piscina-1", 27.0, od=3.2)
+    _lectura(cliente, "piscina-1", 27.0, od=5.5)
+    j = cliente.get("/api/alarmas").json()
+    assert j["activas"] == []
+    assert len(j["historial"]) == 1
+
+
+def test_umbrales_get_y_put(cliente):
+    assert cliente.get("/api/umbrales/piscina-1").json()["od_aviso"] == pytest.approx(4.0)
+    r = cliente.put("/api/umbrales/piscina-1", json={"od_aviso": 5.0, "od_critico": 3.5})
+    assert r.status_code == 401
+    r = cliente.put("/api/umbrales/piscina-1?token=prueba",
+                    json={"od_aviso": 5.0, "od_critico": 3.5})
+    assert r.status_code == 200
+    assert cliente.get("/api/umbrales/piscina-1").json()["od_critico"] == pytest.approx(3.5)
+    # Con el umbral subido a 5.0, una lectura de 4.5 ya dispara alarma.
+    _lectura(cliente, "piscina-1", 27.0, od=4.5)
+    assert len(cliente.get("/api/alarmas").json()["activas"]) == 1
+
+
+def test_home_tiene_banner_y_umbrales(cliente):
+    html = cliente.get("/").text
+    assert 'id="alarmas"' in html
+    assert 'id="btn-umbrales"' in html
+
+
+# --- Estadísticas y exportación ----------------------------------------------
+
+def test_stats_resumen_diario(cliente):
+    _lectura(cliente, "piscina-1", 26.0, od=3.8)
+    _lectura(cliente, "piscina-1", 28.0, od=6.2)
+    j = cliente.get("/api/stats?dias=7&dispositivo=piscina-1").json()
+    assert len(j["dias"]) == 1
+    d = j["dias"][0]
+    assert d["n"] == 2
+    assert d["od_min"] == pytest.approx(3.8)
+    assert d["od_max"] == pytest.approx(6.2)
+    assert d["od_prom"] == pytest.approx(5.0)
+    assert d["temp_min"] == pytest.approx(26.0)
+    assert d["temp_max"] == pytest.approx(28.0)
+
+
+def test_stats_filtra_dispositivo(cliente):
+    _lectura(cliente, "piscina-1", 26.0, od=5.0)
+    _lectura(cliente, "piscina-2", 30.0, od=7.0)
+    j = cliente.get("/api/stats?dias=7&dispositivo=piscina-2").json()
+    assert len(j["dias"]) == 1
+    assert j["dias"][0]["od_min"] == pytest.approx(7.0)
+
+
+def test_export_csv(cliente):
+    _lectura(cliente, "piscina-1", 26.0, od=5.0)
+    _lectura(cliente, "piscina-2", 30.0, od=7.0)
+    r = cliente.get("/api/export.csv")
+    assert r.status_code == 200
+    assert "text/csv" in r.headers["content-type"]
+    lineas = r.text.strip().splitlines()
+    assert lineas[0].startswith("recibido_en,")
+    assert len(lineas) == 3
+    # Filtro por dispositivo
+    r = cliente.get("/api/export.csv?dispositivo=piscina-1")
+    assert len(r.text.strip().splitlines()) == 2
+    assert "piscina-1" in r.text and "piscina-2" not in r.text
+
+
+def test_home_tiene_resumen_y_csv(cliente):
+    html = cliente.get("/").text
+    assert 'id="resumen"' in html
+    assert "/api/export.csv" in html
