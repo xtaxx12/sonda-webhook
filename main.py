@@ -34,7 +34,7 @@ import re
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 import alertas
@@ -391,6 +391,8 @@ PAGINA = """<!doctype html>
   body {
     --fondo:#fbfbfa; --tinta:#1a1a18; --tinta2:#6b6a66; --borde:#e5e4e0;
     --tarjeta:#ffffff; --aviso:#b45309;
+    --z-ok:#158a60; --z-aviso:#b45309; --z-crit:#c0322f;
+    --z-aviso-bg:rgba(180,83,9,.09); --z-crit-bg:rgba(192,50,47,.10);
     --s-od:#2a78d6; --s-temp:#eb6834; --s-sat:#1baf7a;
     font-family: system-ui, -apple-system, sans-serif; margin:0;
     padding-block: 2rem; padding-inline: 1.25rem; max-width: 46rem;
@@ -399,10 +401,17 @@ PAGINA = """<!doctype html>
   @media (prefers-color-scheme: dark) { body {
     --fondo:#191917; --tinta:#f0efec; --tinta2:#a3a29b; --borde:#35342f;
     --tarjeta:#232320; --aviso:#f59e0b;
+    --z-ok:#38c496; --z-aviso:#f59e0b; --z-crit:#f07676;
+    --z-aviso-bg:rgba(245,158,11,.10); --z-crit-bg:rgba(240,118,118,.12);
     --s-od:#3987e5; --s-temp:#d95926; --s-sat:#199e70;
   } }
+  [hidden] { display:none !important; }  /* que hidden gane a display:flex */
   h1 { font-size:1.15rem; font-weight:600; letter-spacing:-.01em; margin:0 0 1.25rem; }
-  .grid { display:grid; gap:.75rem; grid-template-columns:repeat(auto-fit,minmax(9rem,1fr)); }
+  .grid { display:grid; gap:.75rem; grid-template-columns:repeat(2,1fr); }
+  .tarjeta.principal { grid-column:1/-1; }
+  .tarjeta.principal .valor { font-size:2.9rem; line-height:1.05; }
+  .tarjeta.principal[data-zona=aviso]   .valor { color:var(--z-aviso); }
+  .tarjeta.principal[data-zona=critico] .valor { color:var(--z-crit); }
   .tarjeta { background:var(--tarjeta); border:1px solid var(--borde); border-radius:.6rem; padding:1rem 1.1rem; }
   .tarjeta h2 { font-size:.72rem; font-weight:500; text-transform:uppercase;
                 letter-spacing:.06em; color:var(--tinta2); margin:0 0 .4rem;
@@ -432,6 +441,60 @@ PAGINA = """<!doctype html>
              padding:.7rem 1rem; margin-bottom:1rem; font-size:.88rem; line-height:1.8; }
   #alarmas strong { color:#e34948; }
   @media (prefers-color-scheme: dark) { #alarmas strong { color:#e66767; } #alarmas { border-color:#e66767; } }
+  /* Estado operativo: lo primero que se lee, y lo unico que importa de madrugada. */
+  .estado { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap;
+            border:1px solid var(--borde); background:var(--tarjeta);
+            border-radius:.6rem; padding:.6rem .9rem; margin-bottom:.75rem; font-size:.9rem; }
+  .estado .pill { font-weight:600; display:flex; align-items:center; gap:.5em; }
+  .estado .pill::before { content:""; width:.62em; height:.62em; border-radius:50%;
+                          background:currentColor; flex:none; }
+  .estado .frescura { margin-left:auto; color:var(--tinta2); font-size:.82rem; }
+  .estado[data-zona=normal]  { border-color:var(--z-ok);    color:var(--z-ok); }
+  .estado[data-zona=aviso]   { border-color:var(--z-aviso); color:var(--z-aviso); background:var(--z-aviso-bg); }
+  .estado[data-zona=critico] { border-color:var(--z-crit);  color:var(--z-crit);  background:var(--z-crit-bg); }
+  .estado[data-frio=si] { border-color:var(--aviso); color:var(--aviso); }
+  .estado[data-zona=critico] .pill { animation:latido 1.4s ease-in-out infinite; }
+  @keyframes latido { 50% { opacity:.4 } }
+  @media (prefers-reduced-motion: reduce) { .estado[data-zona=critico] .pill { animation:none } }
+
+  /* Vista de conjunto: con una sonda sobra, con doce es la pantalla principal. */
+  .resumen-finca { margin:0 0 .6rem; font-size:.86rem; color:var(--tinta2);
+                   display:flex; gap:.85rem; flex-wrap:wrap; align-items:baseline; }
+  .resumen-finca .c-critico  { color:var(--z-crit);  font-weight:600; }
+  .resumen-finca .c-aviso    { color:var(--z-aviso); font-weight:600; }
+  .resumen-finca .c-sin      { color:var(--aviso);   font-weight:600; }
+  .rejilla { display:grid; gap:.6rem; margin-bottom:1.3rem;
+             grid-template-columns:repeat(auto-fill,minmax(10.5rem,1fr)); }
+  .piscina { text-align:left; font:inherit; cursor:pointer; color:var(--tinta);
+             background:var(--tarjeta); border:1px solid var(--borde);
+             border-radius:.6rem; padding:.7rem .8rem; }
+  .piscina:hover { border-color:var(--tinta2); }
+  .piscina.activa { border-color:var(--tinta); box-shadow:inset 0 0 0 1px var(--tinta); }
+  .piscina[data-zona=critico]   { border-color:var(--z-crit);  background:var(--z-crit-bg); }
+  .piscina[data-zona=aviso]     { border-color:var(--z-aviso); background:var(--z-aviso-bg); }
+  .piscina[data-zona=sin_datos] { border-style:dashed; }
+  .piscina .nom { font-size:.75rem; color:var(--tinta2); margin:0 0 .25rem;
+                  display:flex; align-items:center; gap:.4em;
+                  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .piscina .od { font-size:1.45rem; font-weight:600; margin:0; letter-spacing:-.02em; }
+  .piscina .od small { font-size:.7rem; font-weight:400; color:var(--tinta2); margin-left:.2rem; }
+  .piscina[data-zona=critico] .od { color:var(--z-crit); }
+  .piscina[data-zona=aviso]   .od { color:var(--z-aviso); }
+  .piscina svg { display:block; width:100%; height:26px; margin-top:.3rem; }
+  .piscina .pie { margin:.25rem 0 0; font-size:.71rem; color:var(--tinta2);
+                  display:flex; justify-content:space-between; gap:.4rem; }
+
+  .tendencia { margin:.55rem 0 0; font-size:.88rem; color:var(--tinta2);
+               display:flex; gap:.9rem; flex-wrap:wrap; align-items:baseline; }
+  .tendencia .margen { color:var(--z-aviso); font-weight:600; }
+  .tendencia .umbrales { margin-left:auto; font-size:.8rem; }
+
+  .banda-crit  { fill:var(--z-crit);  opacity:.13; }
+  .banda-aviso { fill:var(--z-aviso); opacity:.11; }
+  .banda-noche { fill:var(--tinta);   opacity:.055; }
+  .linea-umbral { stroke:var(--z-crit); stroke-width:1; stroke-dasharray:4 3; opacity:.6; }
+  .etq-umbral { font-size:9px; fill:var(--z-crit); opacity:.85; }
+
   #tooltip { position:fixed; pointer-events:none; background:var(--tarjeta); color:var(--tinta);
              border:1px solid var(--borde); border-radius:.45rem; padding:.5rem .7rem;
              font-size:.78rem; line-height:1.6; box-shadow:0 2px 10px rgba(0,0,0,.12);
@@ -474,9 +537,21 @@ PAGINA = """<!doctype html>
 
   <div class="rangos" id="piscinas" hidden><span>Piscina:</span></div>
 
+  <div id="finca" hidden>
+    <p class="resumen-finca" id="resumen-finca"></p>
+    <div class="rejilla" id="rejilla"></div>
+  </div>
+
+  <div class="estado" id="estado" hidden>
+    <span class="pill" id="estado-txt">—</span>
+    <span class="frescura" id="frescura"></span>
+  </div>
+
   <div class="grid" id="tarjetas">
-    <div class="tarjeta"><h2><span class="punto" style="background:var(--s-od)"></span>Oxígeno disuelto</h2>
-      <p class="valor" id="v-od">—<span>mg/L</span></p></div>
+    <div class="tarjeta principal" id="tarjeta-od">
+      <h2><span class="punto" style="background:var(--s-od)"></span>Oxígeno disuelto</h2>
+      <p class="valor" id="v-od">—<span>mg/L</span></p>
+      <p class="tendencia" id="tendencia"></p></div>
     <div class="tarjeta"><h2><span class="punto" style="background:var(--s-temp)"></span>Temperatura</h2>
       <p class="valor" id="v-temp">—<span>°C</span></p></div>
     <div class="tarjeta"><h2><span class="punto" style="background:var(--s-sat)"></span>Saturación</h2>
@@ -571,9 +646,146 @@ let rangoHoras = 1;
 let datos = [];            // ascendente en el tiempo
 let ultimaCarga = null;
 let piscina = "";          // dispositivo seleccionado ("" = el único / todos)
+let umbrales = null;       // { od_aviso, od_critico } de la piscina mostrada
+let finca = {};            // dispositivo -> estado, para el mapa y la rejilla
 try { piscina = localStorage.getItem("piscina_panel") || ""; } catch (e) {}
 
 const fmtHora = t => t.toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
+
+const COLOR_ZONA = {
+  normal: "--z-ok", aviso: "--z-aviso", critico: "--z-crit",
+  sin_datos: "--tinta2", desconocida: "--tinta2",
+};
+const cssVar = n => getComputedStyle(document.body).getPropertyValue(n).trim() || "#888";
+
+function chispa(valores, color) {
+  if (!valores || valores.length < 2) return "";
+  const w = 100, h = 26, min = Math.min(...valores), max = Math.max(...valores);
+  const rango = (max - min) || 1;
+  const d = valores.map((v, i) =>
+    `${i ? "L" : "M"}${(i / (valores.length - 1) * w).toFixed(1)},` +
+    `${(h - 2 - (v - min) / rango * (h - 5)).toFixed(1)}`).join("");
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">` +
+         `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" ` +
+         `vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+}
+
+// Vista de conjunto: con doce piscinas, entrar viendo el detalle de una
+// —la de lectura más reciente, que era el criterio— responde la pregunta
+// equivocada. Primero cuál necesita atención; el detalle después.
+async function cargarFinca() {
+  let j;
+  try { j = await (await fetch("/api/estados")).json(); } catch (e) { return; }
+  const lista = j.piscinas || [];
+  finca = Object.fromEntries(lista.map(p => [p.dispositivo, p]));
+
+  const cont = document.getElementById("finca");
+  if (lista.length < 2) { cont.hidden = true; return; }   // una sola: sería ruido
+  cont.hidden = false;
+
+  const r = j.resumen || {};
+  const trozos = [`<span><b>${r.total}</b> piscinas</span>`];
+  if (r.critico)   trozos.push(`<span class="c-critico">${r.critico} en crítico</span>`);
+  if (r.aviso)     trozos.push(`<span class="c-aviso">${r.aviso} en aviso</span>`);
+  if (r.sin_datos) trozos.push(`<span class="c-sin">${r.sin_datos} sin datos</span>`);
+  if (r.normal)    trozos.push(`<span>${r.normal} normales</span>`);
+  document.getElementById("resumen-finca").innerHTML = trozos.join("");
+
+  document.getElementById("rejilla").innerHTML = lista.map(p => {
+    const od = p.oxigeno_disuelto === null || p.oxigeno_disuelto === undefined
+      ? "—" : p.oxigeno_disuelto.toFixed(2);
+    const pend = p.pendiente_od_hora;
+    const tend = p.zona === "sin_datos" ? "sin reportar"
+      : pend === null || pend === undefined ? "—"
+      : Math.abs(pend) < 0.05 ? "→ estable"
+      : `${pend < 0 ? "↓" : "↑"} ${Math.abs(pend).toFixed(2)}/h`;
+    const margen = p.horas_a_critico !== null && p.horas_a_critico !== undefined
+      ? `<span class="c-aviso">~${p.horas_a_critico < 1 ? Math.round(p.horas_a_critico*60)+" min" : p.horas_a_critico.toFixed(1)+" h"}</span>`
+      : `<span>${haceCuanto(p.edad_segundos)}</span>`;
+    return `<button class="piscina${p.dispositivo === piscina ? " activa" : ""}" ` +
+      `data-zona="${p.zona}" data-ir="${encodeURIComponent(p.dispositivo)}">` +
+      `<p class="nom"><span class="punto" style="background:${cssVar(COLOR_ZONA[p.zona])}"></span>` +
+      `${p.nombre}</p>` +
+      `<p class="od">${od}<small>mg/L</small></p>` +
+      chispa(p.chispa, cssVar(COLOR_ZONA[p.zona])) +
+      `<p class="pie"><span>${tend}</span>${margen}</p></button>`;
+  }).join("");
+}
+
+document.getElementById("rejilla").addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-ir]");
+  if (!b) return;
+  piscina = decodeURIComponent(b.dataset.ir);
+  try { localStorage.setItem("piscina_panel", piscina); } catch (e) {}
+  cargarFinca();
+  pintarPiscinas();
+  cargarEstado().then(cargar);
+  cargarResumen();
+  document.getElementById("estado").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+const ETIQUETA_ZONA = {
+  normal:  "Oxígeno normal",
+  aviso:   "Oxígeno bajo",
+  critico: "Oxígeno crítico",
+  desconocida: "Sin lectura de oxígeno",
+};
+
+function haceCuanto(seg) {
+  if (seg === null || seg === undefined) return "";
+  if (seg < 90) return `hace ${Math.max(0, Math.round(seg))} s`;
+  if (seg < 5400) return `hace ${Math.round(seg / 60)} min`;
+  return `hace ${Math.round(seg / 3600)} h`;
+}
+
+// El estado vive en el servidor (/api/estado) para que el panel y las alarmas
+// no puedan discrepar sobre qué cuenta como crítico.
+async function cargarEstado() {
+  const franja = document.getElementById("estado");
+  const tarjeta = document.getElementById("tarjeta-od");
+  const tend = document.getElementById("tendencia");
+  let e;
+  try {
+    const r = await fetch("/api/estado" + (piscina ? `?dispositivo=${encodeURIComponent(piscina)}` : ""));
+    e = await r.json();
+  } catch (err) { return; }
+
+  if (!e.hay_datos) { franja.hidden = true; tend.textContent = ""; return; }
+
+  umbrales = e.umbrales;
+  franja.hidden = false;
+  franja.dataset.zona = e.zona;
+  // Un dato viejo no es un estado: si la sonda lleva rato muda, eso es lo
+  // que hay que gritar, no el último valor que se alcanzó a leer.
+  const frio = e.edad_segundos !== null && e.edad_segundos > 180;
+  franja.dataset.frio = frio ? "si" : "no";
+  document.getElementById("estado-txt").textContent =
+    frio ? "Sin datos recientes" : ETIQUETA_ZONA[e.zona] || e.zona;
+  document.getElementById("frescura").textContent =
+    haceCuanto(e.edad_segundos) + (e.dispositivo ? ` · ${e.dispositivo}` : "");
+
+  tarjeta.dataset.zona = frio ? "desconocida" : e.zona;
+
+  const partes = [];
+  const p = e.pendiente_od_hora;
+  if (p === null || p === undefined) {
+    partes.push("<span>Tendencia: pocas lecturas todavía</span>");
+  } else if (Math.abs(p) < 0.05) {
+    partes.push("<span>→ estable</span>");
+  } else {
+    partes.push(`<span>${p < 0 ? "↓" : "↑"} ${Math.abs(p).toFixed(2)} mg/L por hora</span>`);
+  }
+  if (e.horas_a_critico !== null && e.horas_a_critico !== undefined) {
+    const h = e.horas_a_critico;
+    const cuando = h < 1 ? `${Math.round(h * 60)} min` : `${h.toFixed(1)} h`;
+    partes.push(`<span class="margen">Llega al crítico en ~${cuando}</span>`);
+  }
+  if (umbrales) {
+    partes.push(`<span class="umbrales">aviso ${umbrales.od_aviso}` +
+                ` · crítico ${umbrales.od_critico} mg/L</span>`);
+  }
+  tend.innerHTML = partes.join("");
+}
 
 async function cargar() {
   const desde = new Date(Date.now() - rangoHoras * 3600e3).toISOString();
@@ -627,12 +839,22 @@ function render() {
   }).join("");
 }
 
-function escala(puntos, campo, h, padT, padB) {
+function escala(puntos, campo, h, padT, padB, incluir) {
   const vals = puntos.map(p => p[campo]).filter(v => v !== null && v !== undefined);
   let vmin = Math.min(...vals), vmax = Math.max(...vals);
+  const minReal = vmin;               // sin el margen estético, para decidir umbrales
   if (vmin === vmax) { vmin -= 1; vmax += 1; }
   const margen = (vmax - vmin) * 0.12;
   vmin -= margen; vmax += margen;
+  // Bajar el eje hasta el umbral siempre aplastaría la línea contra el techo y
+  // escondería la tendencia, que es la señal temprana. Se hace solo cuando el
+  // agua ya se acerca al aviso: ahí el margen importa más que el detalle.
+  // Contra el vmin ORIGINAL, no contra el ya bajado: si no, incluir el aviso
+  // vuelve elegible al crítico y la escala cae en cascada hasta el fondo
+  // aunque el agua esté perfecta.
+  for (const v of (incluir || [])) {
+    if (v !== null && v !== undefined && v < minReal && minReal - v <= 2) vmin = Math.min(vmin, v - 0.15);
+  }
   return { vmin, vmax, y: v => padT + (1 - (v - vmin) / (vmax - vmin)) * (h - padT - padB) };
 }
 
@@ -647,9 +869,46 @@ function dibujar(serie) {
   const padL = 46, padR = 12, padT = 8, padB = 18;
   const t0 = Date.now() - rangoHoras * 3600e3, t1 = Date.now();
   const x = t => padL + (t - t0) / (t1 - t0) * (w - padL - padR);
-  const { vmin, vmax, y } = escala(puntos, serie.campo, h, padT, padB);
+  const esOD = serie.campo === "oxigeno_disuelto";
+  const forzar = esOD && umbrales ? [umbrales.od_aviso, umbrales.od_critico] : null;
+  const { vmin, vmax, y } = escala(puntos, serie.campo, h, padT, padB, forzar);
 
   let svg = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${serie.nombre}, últimas ${rangoHoras} horas">`;
+
+  // Franja nocturna: el oxígeno se desploma de madrugada, cuando la respiración
+  // lleva horas sin fotosíntesis que la compense. Sin marcar la noche, el ciclo
+  // diario es invisible y el mínimo del amanecer parece un dato suelto.
+  if (rangoHoras >= 6) {
+    const paso = 15 * 60e3;
+    let ini = null;
+    for (let t = t0; t <= t1 + paso; t += paso) {
+      const hora = new Date(t).getHours();
+      const noche = hora >= 18 || hora < 6;
+      if (noche && ini === null) ini = t;
+      if ((!noche || t > t1) && ini !== null) {
+        const x0 = Math.max(padL, x(ini)), x1 = Math.min(w - padR, x(Math.min(t, t1)));
+        if (x1 > x0) svg += `<rect class="banda-noche" x="${x0.toFixed(1)}" y="${padT}" ` +
+                            `width="${(x1 - x0).toFixed(1)}" height="${h - padT - padB}"/>`;
+        ini = null;
+      }
+    }
+  }
+
+  // Bandas de umbral: el número solo no dice si 6.1 mg/L está bien o mal.
+  if (esOD && umbrales) {
+    const piso = h - padB;
+    const yc = Math.min(piso, Math.max(padT, y(umbrales.od_critico)));
+    const ya = Math.min(piso, Math.max(padT, y(umbrales.od_aviso)));
+    if (ya < piso) svg += `<rect class="banda-aviso" x="${padL}" y="${ya.toFixed(1)}" ` +
+                          `width="${w - padL - padR}" height="${(piso - ya).toFixed(1)}"/>`;
+    if (yc < piso) svg += `<rect class="banda-crit" x="${padL}" y="${yc.toFixed(1)}" ` +
+                          `width="${w - padL - padR}" height="${(piso - yc).toFixed(1)}"/>`;
+    if (y(umbrales.od_critico) > padT && y(umbrales.od_critico) < piso) {
+      svg += `<line class="linea-umbral" x1="${padL}" x2="${w - padR}" y1="${yc.toFixed(1)}" y2="${yc.toFixed(1)}"/>`;
+      svg += `<text class="etq-umbral" x="${w - padR - 2}" y="${(yc - 3).toFixed(1)}" text-anchor="end">crítico ${umbrales.od_critico}</text>`;
+    }
+  }
+
   const nivel = f => vmin + (vmax - vmin) * f;
   for (const f of [0, 0.5, 1]) {
     const yy = y(nivel(f)).toFixed(1);
@@ -843,21 +1102,31 @@ async function cargarDispositivos() {
   marcadores.clearLayers();
   const puestos = dispositivos.filter(d => d.lat !== null && d.lng !== null);
   for (const d of puestos) {
-    let color = "#8a8984", estado = "○ Sin lecturas todavía";
+    // El color es la ZONA DE OXÍGENO, no la conectividad. Con doce piscinas,
+    // un mapa todo verde porque todas reportan —con una muriéndose— es
+    // exactamente el fallo que un mapa debe evitar.
+    const e = finca[d.nombre];
+    const zona = e ? e.zona : "desconocida";
+    let color = cssVar(COLOR_ZONA[zona] || "--tinta2");
+    let estado = { normal: "● Oxígeno normal", aviso: "● Oxígeno bajo",
+                   critico: "● Oxígeno crítico", sin_datos: "○ Sin datos recientes" }[zona]
+                 || "○ Sin lecturas todavía";
+    if (!d.ultima) { color = cssVar("--tinta2"); estado = "○ Sin lecturas todavía"; }
     if (d.ultima) {
       const edad = (Date.now() - new Date(d.ultima.recibido_en).getTime()) / 1000;
-      if (edad <= 90) { color = "#008300"; estado = "● En línea"; }
-      else { color = "#c98500"; estado = `⚠ Sin datos desde hace ${edad < 5400 ? Math.round(edad / 60) + " min" : Math.round(edad / 3600) + " h"}`; }
+      if (edad > 90) estado += ` · hace ${edad < 5400 ? Math.round(edad / 60) + " min" : Math.round(edad / 3600) + " h"}`;
     }
     const u = d.ultima;
     const datos = u ? `<b>${u.oxigeno_disuelto?.toFixed(2) ?? "—"}</b> mg/L · ` +
                       `<b>${u.temperatura?.toFixed(2) ?? "—"}</b> °C · ` +
                       `<b>${u.saturacion?.toFixed(1) ?? "—"}</b> %<br>` : "";
     L.circleMarker([d.lat, d.lng], {
-      radius: 9, color: "#ffffff", weight: 2, fillColor: color, fillOpacity: 0.95,
+      radius: zona === "critico" ? 11 : 9, color: "#ffffff", weight: 2,
+      dashArray: zona === "sin_datos" ? "3 3" : null,
+      fillColor: color, fillOpacity: 0.95,
     }).bindPopup(
-      `<div class="popup-dato"><strong>${d.nombre}</strong>` +
-      (d.descripcion ? ` — ${d.descripcion}` : "") + `<br>${datos}${estado}<br>` +
+      `<div class="popup-dato"><strong>${(e && e.nombre) || d.descripcion || d.nombre}</strong>` +
+      `<br>${datos}${estado}<br>` +
       `<button class="popup-quitar" data-quitar="${encodeURIComponent(d.nombre)}">🗑 Quitar del mapa</button></div>`
     ).addTo(marcadores);
   }
@@ -946,7 +1215,7 @@ document.getElementById("piscinas").addEventListener("click", ev => {
   piscina = decodeURIComponent(b.dataset.piscina);
   try { localStorage.setItem("piscina_panel", piscina); } catch (e) {}
   pintarPiscinas();
-  cargar();
+  cargarEstado().then(cargar);
   cargarResumen();
 });
 
@@ -972,11 +1241,15 @@ document.getElementById("rangos").addEventListener("click", ev => {
 addEventListener("resize", () => { if (datos.length) render(); });
 
 iniciarMapa();
-cargar();
-cargarDispositivos();
+cargarFinca().then(cargarDispositivos);
+cargarEstado().then(cargar);
 cargarAlarmas();
 cargarResumen();
-setInterval(() => { cargar(); cargarDispositivos(); cargarAlarmas(); }, 10000);
+setInterval(() => {
+  cargarFinca().then(cargarDispositivos);   // el mapa necesita las zonas ya cargadas
+  cargarEstado().then(cargar);
+  cargarAlarmas();
+}, 10000);
 setInterval(cargarResumen, 60000);
 </script>
 </body></html>"""
@@ -1109,6 +1382,229 @@ def api_alarmas(limit: int = Query(default=50, ge=1, le=500)):
     with db() as con:
         return {"activas": alertas.alarmas_activas(con),
                 "historial": alertas.historial(con, limit)}
+
+
+ORDEN_URGENCIA = {"critico": 0, "aviso": 1, "sin_datos": 2, "desconocida": 3, "normal": 4}
+
+
+@app.get("/api/estados")
+def api_estados():
+    """
+    Estado de todas las piscinas de una vez, ordenadas por urgencia.
+
+    Con una sonda daba igual consultarlas una por una; con doce serían doce
+    peticiones cada diez segundos. Aquí las agregaciones se hacen en SQL
+    —una consulta por concepto, no una por piscina— para que añadir sondas
+    no multiplique el trabajo de la base.
+    """
+    ahora = datetime.now(timezone.utc)
+    t_hora = ahora - timedelta(hours=1)
+    t_seis = ahora - timedelta(hours=6)
+
+    with db() as con:
+        ultimas = con.execute("""
+            SELECT l.dispositivo, l.recibido_en, l.oxigeno_disuelto, l.temperatura, l.saturacion
+            FROM lecturas l
+            JOIN (SELECT dispositivo, MAX(id) mid FROM lecturas
+                  WHERE dispositivo IS NOT NULL GROUP BY dispositivo) u ON l.id = u.mid
+        """).fetchall()
+
+        # Regresión por mínimos cuadrados hecha con sumas en SQL: el tiempo se
+        # mide en horas desde el inicio de la ventana para no perder precisión
+        # elevando al cuadrado epochs de diez cifras.
+        base = int(t_hora.timestamp())
+        pend = {}
+        for f in con.execute("""
+            SELECT dispositivo, COUNT(*) n,
+                   SUM((strftime('%s', recibido_en) - ?) / 3600.0) sx,
+                   SUM(oxigeno_disuelto) sy,
+                   SUM((strftime('%s', recibido_en) - ?) / 3600.0 * oxigeno_disuelto) sxy,
+                   SUM(((strftime('%s', recibido_en) - ?) / 3600.0) *
+                       ((strftime('%s', recibido_en) - ?) / 3600.0)) sxx
+            FROM lecturas
+            WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL AND dispositivo IS NOT NULL
+            GROUP BY dispositivo
+        """, (base, base, base, base, t_hora.isoformat())):
+            n = f["n"]
+            if n < 5:
+                continue
+            den = f["sxx"] - f["sx"] * f["sx"] / n
+            if den and abs(den) > 1e-12:
+                pend[f["dispositivo"]] = round((f["sxy"] - f["sx"] * f["sy"] / n) / den, 3)
+
+        # Chispa: OD promediado en cubos de 15 min sobre 6 h. Agregar en SQL
+        # evita traer miles de filas al navegador solo para dibujar 24 puntos.
+        chispas: dict = {}
+        for f in con.execute("""
+            SELECT dispositivo, CAST(strftime('%s', recibido_en) / 900 AS INTEGER) cubo,
+                   AVG(oxigeno_disuelto) od
+            FROM lecturas
+            WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL AND dispositivo IS NOT NULL
+            GROUP BY dispositivo, cubo ORDER BY dispositivo, cubo
+        """, (t_seis.isoformat(),)):
+            chispas.setdefault(f["dispositivo"], []).append(round(f["od"], 2))
+
+        conf = {f["nombre"]: f["descripcion"] for f in
+                con.execute("SELECT nombre, descripcion FROM dispositivos")}
+
+        piscinas = []
+        for f in ultimas:
+            nombre = f["dispositivo"]
+            umbrales = alertas.umbrales_de(con, nombre)
+            try:
+                edad = (ahora - datetime.fromisoformat(f["recibido_en"])).total_seconds()
+            except (TypeError, ValueError):
+                edad = None
+
+            # Una piscina muda no está "normal": está sin datos, que para
+            # decidir si te levantas es tan accionable como un aviso.
+            callada = edad is not None and edad > 180
+            zona = "sin_datos" if callada else _zona_od(f["oxigeno_disuelto"], umbrales)
+
+            p = pend.get(nombre)
+            horas = None
+            if p is not None and p < -0.05 and f["oxigeno_disuelto"] is not None and not callada:
+                margen = f["oxigeno_disuelto"] - umbrales["od_critico"]
+                if margen > 0:
+                    horas = round(margen / -p, 1)
+
+            piscinas.append({
+                "dispositivo": nombre,
+                "nombre": conf.get(nombre) or nombre,
+                "zona": zona,
+                "oxigeno_disuelto": f["oxigeno_disuelto"],
+                "temperatura": f["temperatura"],
+                "saturacion": f["saturacion"],
+                "umbrales": umbrales,
+                "pendiente_od_hora": p,
+                "horas_a_critico": horas,
+                "edad_segundos": round(edad) if edad is not None else None,
+                "chispa": chispas.get(nombre, []),
+            })
+
+    # Primero lo que exige acción, y dentro de cada grupo lo que menos margen
+    # tiene. En orden alfabético la piscina que se muere queda en la fila cuatro.
+    piscinas.sort(key=lambda p: (
+        ORDEN_URGENCIA.get(p["zona"], 9),
+        p["horas_a_critico"] if p["horas_a_critico"] is not None else 1e9,
+        p["oxigeno_disuelto"] if p["oxigeno_disuelto"] is not None else 1e9,
+    ))
+
+    resumen = {"total": len(piscinas)}
+    for z in ("critico", "aviso", "sin_datos", "normal", "desconocida"):
+        n = sum(1 for p in piscinas if p["zona"] == z)
+        if n or z in ("critico", "aviso"):
+            resumen[z] = n
+    return {"resumen": resumen, "piscinas": piscinas}
+
+
+@app.get("/api/estado")
+def api_estado(dispositivo: str = Query(default="")):
+    """
+    Estado operativo de una piscina: en qué zona está el oxígeno, hacia dónde
+    va y cuánto margen queda antes del umbral crítico.
+
+    Responde la pregunta de las 3 de la mañana — "¿tengo que levantarme a
+    prender los aireadores?" — sin que nadie tenga que interpretar una gráfica.
+    La lógica de zonas vive aquí y no en el navegador, para que el panel y las
+    alarmas nunca puedan discrepar sobre qué es «crítico».
+    """
+    sql = SQL_ULTIMA_VALIDA
+    params: list = []
+    if dispositivo:
+        sql = sql.replace("ORDER BY", "AND dispositivo = ? ORDER BY")
+        params.append(dispositivo)
+
+    with db() as con:
+        ult = con.execute(sql, params).fetchone()
+        if not ult:
+            return {"hay_datos": False}
+
+        nombre = ult["dispositivo"] or "sonda"
+        umbrales = alertas.umbrales_de(con, nombre)
+
+        desde = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        historia = con.execute(
+            """SELECT recibido_en, oxigeno_disuelto FROM lecturas
+               WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL
+                 AND dispositivo IS ? ORDER BY recibido_en""",
+            (desde, ult["dispositivo"]),
+        ).fetchall()
+
+    od = ult["oxigeno_disuelto"]
+    zona = _zona_od(od, umbrales)
+    pendiente = _pendiente_por_hora(historia)
+
+    # Margen: a este ritmo de caída, cuánto falta para tocar el crítico.
+    # Solo tiene sentido si está bajando de verdad; el ruido de la sonda
+    # produce pendientes minúsculas que darían estimaciones absurdas.
+    horas_a_critico = None
+    if pendiente is not None and pendiente < -0.05 and od is not None:
+        margen = od - umbrales["od_critico"]
+        if margen > 0:
+            horas_a_critico = round(margen / -pendiente, 1)
+
+    try:
+        edad = (datetime.now(timezone.utc)
+                - datetime.fromisoformat(ult["recibido_en"])).total_seconds()
+    except (TypeError, ValueError):
+        edad = None
+
+    return {
+        "hay_datos": True,
+        "dispositivo": nombre,
+        "zona": zona,
+        "oxigeno_disuelto": od,
+        "temperatura": ult["temperatura"],
+        "saturacion": ult["saturacion"],
+        "umbrales": umbrales,
+        "pendiente_od_hora": pendiente,
+        "horas_a_critico": horas_a_critico,
+        "edad_segundos": round(edad) if edad is not None else None,
+        "medido_en": ult["recibido_en"],
+        "muestras_tendencia": len(historia),
+    }
+
+
+def _zona_od(od: Optional[float], umbrales: dict) -> str:
+    """normal | aviso | critico | desconocida. Mismo criterio que las alarmas."""
+    if od is None:
+        return "desconocida"
+    if od < umbrales["od_critico"]:
+        return "critico"
+    if od < umbrales["od_aviso"]:
+        return "aviso"
+    return "normal"
+
+
+def _pendiente_por_hora(filas) -> Optional[float]:
+    """
+    Tendencia del oxígeno en mg/L por hora, por mínimos cuadrados.
+
+    Una regresión sobre la última hora resiste mucho mejor el ruido que restar
+    la primera y la última lectura, que es justo lo que haría que la tendencia
+    saltara de signo entre refrescos.
+    """
+    puntos = []
+    for f in filas:
+        try:
+            t = datetime.fromisoformat(f["recibido_en"]).timestamp() / 3600.0
+        except (TypeError, ValueError):
+            continue
+        if f["oxigeno_disuelto"] is not None:
+            puntos.append((t, f["oxigeno_disuelto"]))
+
+    n = len(puntos)
+    if n < 5:
+        return None
+
+    tm = sum(p[0] for p in puntos) / n
+    vm = sum(p[1] for p in puntos) / n
+    num = sum((t - tm) * (v - vm) for t, v in puntos)
+    den = sum((t - tm) ** 2 for t, _ in puntos)
+    if den == 0:
+        return None
+    return round(num / den, 3)
 
 
 @app.get("/api/umbrales/{nombre}")

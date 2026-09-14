@@ -270,3 +270,179 @@ def test_lectura_de_fallo_no_rompe_latest_ni_stats(cliente):
                  json={"deviceName": "piscina-1", "error": "sonda sin respuesta"})
     assert cliente.get("/api/latest").json()["temperatura"] == pytest.approx(26.0)
     assert cliente.get("/api/stats?dias=7").json()["dias"][0]["n"] == 1
+
+
+# --- Estado operativo: zona, tendencia y margen -------------------------------
+
+def _sembrar(mod, serie, dispositivo="piscina-1"):
+    """Inserta lecturas de OD espaciadas 2 min hacia atrás desde ahora."""
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    with mod.db() as con:
+        for i, od in enumerate(serie):
+            t = (ahora - timedelta(minutes=2 * (len(serie) - 1 - i))).isoformat()
+            con.execute(
+                "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+                " oxigeno_disuelto, temperatura, saturacion, payload)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (t, t, dispositivo, od, 27.5, od / 7.8 * 100, "{}"))
+
+
+def test_estado_sin_datos(cliente):
+    assert cliente.get("/api/estado").json() == {"hay_datos": False}
+
+
+def test_estado_clasifica_la_zona(cliente):
+    import main
+    _sembrar(main, [3.5] * 6)
+    e = cliente.get("/api/estado").json()
+    assert e["hay_datos"] is True
+    # 3.5 está bajo el aviso (4.0) pero sobre el crítico (3.0)
+    assert e["zona"] == "aviso"
+    assert e["umbrales"] == {"od_aviso": 4.0, "od_critico": 3.0}
+
+
+def test_estado_calcula_pendiente_y_margen(cliente):
+    import main
+    # 30 lecturas cada 2 min bajando 0.05 mg/L => -1.5 mg/L por hora
+    _sembrar(main, [6.0 - i * 0.05 for i in range(30)])
+    e = cliente.get("/api/estado").json()
+    assert -1.6 < e["pendiente_od_hora"] < -1.4
+    # de 4.55 al crítico 3.0, cayendo 1.5/h => ~1 h
+    assert 0.8 < e["horas_a_critico"] < 1.4
+    assert e["muestras_tendencia"] == 30
+
+
+def test_estado_no_inventa_margen_si_el_oxigeno_sube(cliente):
+    import main
+    _sembrar(main, [4.0 + i * 0.05 for i in range(20)])
+    e = cliente.get("/api/estado").json()
+    assert e["pendiente_od_hora"] > 0
+    # Subiendo no hay "llega al crítico en X": estimarlo sería inventar.
+    assert e["horas_a_critico"] is None
+
+
+def test_estado_respeta_umbrales_propios_de_la_piscina(cliente):
+    import main
+    _sembrar(main, [5.5] * 6)
+    cliente.put("/api/umbrales/piscina-1?token=prueba",
+                json={"od_aviso": 6.0, "od_critico": 5.0})
+    e = cliente.get("/api/estado").json()
+    # 5.5 es normal con los umbrales por defecto, pero aviso con los de esta piscina
+    assert e["zona"] == "aviso"
+
+
+def test_zona_od_unitaria():
+    import main
+    u = {"od_aviso": 4.0, "od_critico": 3.0}
+    assert main._zona_od(5.0, u) == "normal"
+    assert main._zona_od(3.5, u) == "aviso"
+    assert main._zona_od(2.5, u) == "critico"
+    assert main._zona_od(None, u) == "desconocida"
+
+
+def test_pendiente_necesita_muestras_suficientes():
+    import main
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    pocas = [{"recibido_en": (ahora - timedelta(minutes=i)).isoformat(),
+              "oxigeno_disuelto": 5.0} for i in range(3)]
+    # Con tres puntos una pendiente sería ruido presentado como dato.
+    assert main._pendiente_por_hora(pocas) is None
+
+
+def test_panel_muestra_estado_y_bandas_de_umbral(cliente):
+    html = cliente.get("/").text
+    assert 'id="estado"' in html and 'id="tendencia"' in html
+    assert "/api/estado" in html
+    # Las bandas de umbral y la franja nocturna se dibujan en la gráfica de OD.
+    assert "banda-crit" in html and "banda-aviso" in html
+    assert "banda-noche" in html
+
+
+# --- Vista de conjunto: varias piscinas --------------------------------------
+
+def _sembrar_finca(mod):
+    """Cinco piscinas en situaciones distintas, incluida una muda."""
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    escenarios = {
+        "p-sana":    [7.0] * 40,
+        "p-aviso":   [3.6] * 40,
+        "p-critica": [2.4] * 40,
+        "p-cayendo": [6.0 - i * 0.05 for i in range(40)],
+    }
+    with mod.db() as con:
+        for nombre, serie in escenarios.items():
+            for i, od in enumerate(serie):
+                t = (ahora - timedelta(minutes=len(serie) - 1 - i)).isoformat()
+                con.execute(
+                    "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+                    " oxigeno_disuelto, temperatura, saturacion, payload)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (t, t, nombre, od, 27.5, od / 7.8 * 100, "{}"))
+        muda = (ahora - timedelta(hours=2)).isoformat()
+        con.execute(
+            "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+            " oxigeno_disuelto, temperatura, saturacion, payload)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (muda, muda, "p-muda", 6.5, 27.5, 83.0, "{}"))
+
+
+def test_estados_ordena_por_urgencia(cliente):
+    import main
+    _sembrar_finca(main)
+    zonas = [p["zona"] for p in cliente.get("/api/estados").json()["piscinas"]]
+    # Primero lo que exige acción; en orden alfabético la que se muere
+    # quedaría enterrada entre las sanas.
+    assert zonas[0] == "critico"
+    assert zonas[1] == "aviso"
+    assert zonas[-1] == "normal"
+
+
+def test_estados_resume_la_finca(cliente):
+    import main
+    _sembrar_finca(main)
+    r = cliente.get("/api/estados").json()["resumen"]
+    assert r == {"total": 5, "critico": 1, "aviso": 1, "sin_datos": 1, "normal": 2}
+
+
+def test_piscina_muda_no_reporta_zona_por_su_ultimo_valor(cliente):
+    import main
+    _sembrar_finca(main)
+    p = next(x for x in cliente.get("/api/estados").json()["piscinas"]
+             if x["dispositivo"] == "p-muda")
+    # Su última lectura fue 6.5 mg/L, pero fue hace dos horas: eso no es "normal".
+    assert p["zona"] == "sin_datos"
+    assert p["horas_a_critico"] is None
+
+
+def test_estados_dentro_del_grupo_ordena_por_margen(cliente):
+    import main
+    _sembrar_finca(main)
+    normales = [p for p in cliente.get("/api/estados").json()["piscinas"]
+                if p["zona"] == "normal"]
+    # La que está cayendo va antes que la estable, aunque ambas sean "normal".
+    assert normales[0]["dispositivo"] == "p-cayendo"
+    assert normales[0]["horas_a_critico"] is not None
+
+
+def test_estados_trae_chispa_y_nombre_legible(cliente):
+    import main
+    _sembrar_finca(main)
+    with main.db() as con:
+        con.execute("INSERT INTO dispositivos (nombre, lat, lng, descripcion)"
+                    " VALUES (?,?,?,?)", ("p-sana", None, None, "Piscina 1 — Norte"))
+    p = next(x for x in cliente.get("/api/estados").json()["piscinas"]
+             if x["dispositivo"] == "p-sana")
+    assert p["nombre"] == "Piscina 1 — Norte"
+    assert len(p["chispa"]) >= 2          # suficiente para dibujar la línea
+
+
+def test_panel_trae_la_vista_de_conjunto(cliente):
+    html = cliente.get("/").text
+    assert 'id="rejilla"' in html and 'id="resumen-finca"' in html
+    assert "/api/estados" in html
+    # El color del marcador sale de la zona, no de la conectividad.
+    assert "COLOR_ZONA" in html
+    assert '"#008300"' not in html

@@ -1,4 +1,3 @@
-
 import socket, struct
 IP   = "192.168.3.157"   # <-- la IP del módulo
 PORT = 8899
