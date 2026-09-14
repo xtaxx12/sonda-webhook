@@ -108,20 +108,34 @@ def preparar_buffer(ruta: str) -> None:
                 oxigeno_disuelto  REAL,
                 temperatura       REAL,
                 saturacion        REAL,
-                enviado           INTEGER NOT NULL DEFAULT 0
+                enviado           INTEGER NOT NULL DEFAULT 0,
+                error             TEXT
             )
         """)
+        # Migración de buffers creados antes de que existiera `error`.
+        columnas = [c[1] for c in con.execute("PRAGMA table_info(cola)")]
+        if "error" not in columnas:
+            con.execute("ALTER TABLE cola ADD COLUMN error TEXT")
 
 
-def encolar(ruta: str, campos: dict) -> None:
+def _redondear(v):
+    # La sonda es float32 con resolución real de centésimas: más dígitos es ruido.
+    return None if v is None else round(v, 2)
+
+
+def encolar(ruta: str, campos, error: str = None) -> None:
+    """Encola una lectura, o un fallo (campos=None) con su motivo en `error`."""
+    campos = campos or {}
     with sqlite3.connect(ruta) as con:
         con.execute(
-            "INSERT INTO cola (creado_en, oxigeno_disuelto, temperatura, saturacion) VALUES (?, ?, ?, ?)",
+            "INSERT INTO cola (creado_en, oxigeno_disuelto, temperatura, saturacion, error)"
+            " VALUES (?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
-                campos["oxigeno_disuelto"],
-                campos["temperatura"],
-                campos["saturacion"],
+                _redondear(campos.get("oxigeno_disuelto")),
+                _redondear(campos.get("temperatura")),
+                _redondear(campos.get("saturacion")),
+                error,
             ),
         )
 
@@ -129,7 +143,7 @@ def encolar(ruta: str, campos: dict) -> None:
 def pendientes(ruta: str) -> list:
     with sqlite3.connect(ruta) as con:
         return con.execute(
-            "SELECT id, creado_en, oxigeno_disuelto, temperatura, saturacion"
+            "SELECT id, creado_en, oxigeno_disuelto, temperatura, saturacion, error"
             " FROM cola WHERE enviado = 0 ORDER BY id"
         ).fetchall()
 
@@ -154,14 +168,13 @@ def enviar_pendientes(ruta: str, url: str, token: str, timeout: float = 5.0) -> 
     destino = f"{url}{separador}token={token}" if token else url
     enviadas = 0
     for fila in pendientes(ruta):
-        id_, creado_en, od, temp, sat = fila
-        cuerpo = json.dumps({
-            "deviceName": DISPOSITIVO,
-            "time": creado_en,
-            "Dissolved_Oxygen": od,
-            "Temperature": temp,
-            "DO_Saturation": sat,
-        }).encode()
+        id_, creado_en, od, temp, sat, error = fila
+        mensaje = {"deviceName": DISPOSITIVO, "time": creado_en}
+        if error:
+            mensaje["error"] = error
+        else:
+            mensaje.update({"Dissolved_Oxygen": od, "Temperature": temp, "DO_Saturation": sat})
+        cuerpo = json.dumps(mensaje).encode()
         peticion = urllib.request.Request(
             destino, data=cuerpo, headers={"Content-Type": "application/json"}
         )
@@ -206,9 +219,11 @@ def bucle():
             print(f"agente: OD={campos['oxigeno_disuelto']:.2f} mg/L "
                   f"T={campos['temperatura']:.2f} °C Sat={campos['saturacion']:.2f} %")
         except TimeoutError:
-            print("agente: la sonda no respondió (¿A/B sueltos?) — nada guardado")
+            print("agente: la sonda no respondió (¿A/B sueltos?)")
+            encolar(buffer_db, None, error="sonda sin respuesta (timeout)")
         except (OSError, ValueError) as e:
             print(f"agente: error leyendo la sonda: {e}")
+            encolar(buffer_db, None, error=str(e)[:200])
 
         n = len(pendientes(buffer_db))
         if n:

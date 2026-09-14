@@ -240,3 +240,33 @@ def test_home_tiene_resumen_y_csv(cliente):
     html = cliente.get("/").text
     assert 'id="resumen"' in html
     assert "/api/export.csv" in html
+
+
+def test_export_csv_neutraliza_formulas(cliente):
+    # Un deviceName malicioso no debe llegar a Excel como fórmula ejecutable.
+    cliente.post("/usr/webhook?token=prueba",
+                 json={"deviceName": "=HYPERLINK(\"http://malo\")", "Temperature": 25.0})
+    texto = cliente.get("/api/export.csv").text
+    assert "'=HYPERLINK" in texto.replace('"', "")
+
+
+# --- Endurecimiento ----------------------------------------------------------
+
+def test_webhook_sin_auth_token_configurado_se_niega(tmp_path, monkeypatch):
+    """Si el servidor arranca sin AUTH_TOKEN, el webhook no acepta nada."""
+    import importlib
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    import main
+    importlib.reload(main)
+    with TestClient(main.app) as c:
+        r = c.post("/usr/webhook", json={"Temperature": 25.0})
+    assert r.status_code == 503
+
+
+def test_lectura_de_fallo_no_rompe_latest_ni_stats(cliente):
+    _lectura(cliente, "piscina-1", 26.0, od=5.0)
+    cliente.post("/usr/webhook?token=prueba",
+                 json={"deviceName": "piscina-1", "error": "sonda sin respuesta"})
+    assert cliente.get("/api/latest").json()["temperatura"] == pytest.approx(26.0)
+    assert cliente.get("/api/stats?dias=7").json()["dias"][0]["n"] == 1

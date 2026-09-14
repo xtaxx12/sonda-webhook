@@ -41,7 +41,7 @@ import alertas
 import modbus
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 # --- Configuración -----------------------------------------------------------
 
@@ -243,9 +243,9 @@ async def guardar_lectura_modbus(campos: dict, dispositivo: Optional[str]) -> No
                 ahora,
                 ahora,  # aquí la medición es nuestra, no diferida por la nube
                 dispositivo,
-                campos.get("oxigeno_disuelto"),
-                campos.get("temperatura"),
-                campos.get("saturacion"),
+                None if campos.get("oxigeno_disuelto") is None else round(campos["oxigeno_disuelto"], 2),
+                None if campos.get("temperatura") is None else round(campos["temperatura"], 2),
+                None if campos.get("saturacion") is None else round(campos["saturacion"], 2),
                 payload,
             ),
         )
@@ -282,10 +282,13 @@ def health():
 
 @app.post("/usr/webhook")
 async def webhook(request: Request, token: str = Query(default="")):
-    if AUTH_TOKEN:
-        entregado = token or request.headers.get("X-Auth-Token", "")
-        if entregado != AUTH_TOKEN:
-            raise HTTPException(status_code=401, detail="token inválido")
+    if not AUTH_TOKEN:
+        # Sin token configurado el webhook queda deshabilitado: cualquier proceso
+        # podría inyectar lecturas falsas (y con alarmas eso es peligroso).
+        raise HTTPException(status_code=503, detail="AUTH_TOKEN no configurado en el servidor")
+    entregado = token or request.headers.get("X-Auth-Token", "")
+    if entregado != AUTH_TOKEN:
+        raise HTTPException(status_code=401, detail="token inválido")
 
     crudo = await request.body()
     texto = crudo.decode("utf-8", errors="replace")
@@ -516,6 +519,20 @@ PAGINA = """<!doctype html>
     <p class="mapa-nota" id="mapa-nota"></p>
   </div>
 
+  <div class="bloque">
+    <div class="mapa-cab">
+      <h2 style="font-size:.72rem;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--tinta2);margin:0">Resumen diario (7 días)</h2>
+      <a id="btn-csv" href="/api/export.csv" download
+         style="font-size:.8rem;padding:.3rem .8rem;border-radius:1rem;border:1px solid var(--borde);background:var(--tarjeta);color:var(--tinta);text-decoration:none">⬇ Descargar CSV</a>
+    </div>
+    <div class="tabla-scroll"><table>
+      <thead><tr><th>Día</th><th>Piscina</th><th>Lecturas</th>
+        <th>OD mín</th><th>OD máx</th><th>OD prom</th>
+        <th>T° mín</th><th>T° máx</th></tr></thead>
+      <tbody id="resumen"></tbody>
+    </table></div>
+  </div>
+
   <details>
     <summary>Ver tabla de lecturas recientes</summary>
     <div class="tabla-scroll"><table>
@@ -643,7 +660,17 @@ function dibujar(serie) {
     const t = t0 + (t1 - t0) * f;
     svg += `<text class="ejex" x="${x(t).toFixed(1)}" y="${h - 4}" text-anchor="middle">${fmtHora(new Date(t))}</text>`;
   }
-  const d = puntos.map((p, i) => `${i ? "L" : "M"}${x(p.t.getTime()).toFixed(1)},${y(p[serie.campo]).toFixed(1)}`).join("");
+  // La línea se corta cuando hay un hueco en los datos (sonda muda, corte de luz):
+  // un corte de dos horas no debe verse igual que agua estable.
+  const deltas = puntos.slice(1).map((p, i) => p.t - puntos[i].t).sort((a, b) => a - b);
+  const mediana = deltas[Math.floor(deltas.length / 2)] || 15000;
+  const corte = Math.max(3 * mediana, 60000);
+  let d = "", tPrev = null;
+  for (const p of puntos) {
+    const t = p.t.getTime();
+    d += `${tPrev === null || t - tPrev > corte ? "M" : "L"}${x(t).toFixed(1)},${y(p[serie.campo]).toFixed(1)}`;
+    tPrev = t;
+  }
   svg += `<path d="${d}" fill="none" stroke="${serie.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
   const fin = puntos[puntos.length - 1];
   svg += `<circle cx="${x(fin.t.getTime()).toFixed(1)}" cy="${y(fin[serie.campo]).toFixed(1)}" r="3.5" fill="${serie.color}"/>`;
@@ -697,6 +724,26 @@ function mostrarCruz(t, cx, cy) {
 function ocultarCruz() {
   document.getElementById("tooltip").hidden = true;
   document.querySelectorAll("[data-cruz],[data-foco]").forEach(e => { e.hidden = true; });
+}
+
+// --- Resumen diario ----------------------------------------------------------
+async function cargarResumen() {
+  const filtro = piscina ? `&dispositivo=${encodeURIComponent(piscina)}` : "";
+  let j, umbral = 4.0;
+  try {
+    j = await (await fetch(`/api/stats?dias=7${filtro}`)).json();
+    if (piscina) umbral = (await (await fetch(`/api/umbrales/${encodeURIComponent(piscina)}`)).json()).od_aviso;
+  } catch (e) { return; }
+  const c = (v, d) => v === null || v === undefined ? "—" : v.toFixed(d);
+  document.getElementById("resumen").innerHTML = j.dias.map(d => {
+    const alarma = d.od_min !== null && d.od_min < umbral;
+    return `<tr><td>${d.fecha}</td><td>${d.dispositivo || "—"}</td><td>${d.n}</td>` +
+      `<td${alarma ? ' style="color:#e34948;font-weight:600"' : ""}>${c(d.od_min, 2)}</td>` +
+      `<td>${c(d.od_max, 2)}</td><td>${c(d.od_prom, 2)}</td>` +
+      `<td>${c(d.temp_min, 1)}</td><td>${c(d.temp_max, 1)}</td></tr>`;
+  }).join("") || '<tr><td colspan="8">Sin datos todavía.</td></tr>';
+  const desde = new Date(Date.now() - 30 * 86400e3).toISOString();
+  document.getElementById("btn-csv").href = `/api/export.csv?since=${encodeURIComponent(desde)}${filtro}`;
 }
 
 // --- Mapa de módulos ---------------------------------------------------------
@@ -880,7 +927,10 @@ function pintarPiscinas() {
     return;
   }
   if (!nombres.includes(piscina)) {
-    piscina = nombres[0];
+    // Por defecto, la piscina con la lectura más reciente.
+    const conUltima = dispositivos.filter(d => d.ultima)
+      .sort((a, b) => new Date(b.ultima.recibido_en) - new Date(a.ultima.recibido_en));
+    piscina = (conUltima[0] || {}).nombre || nombres[0];
     try { localStorage.setItem("piscina_panel", piscina); } catch (e) {}
   }
   cont.hidden = false;
@@ -897,6 +947,7 @@ document.getElementById("piscinas").addEventListener("click", ev => {
   try { localStorage.setItem("piscina_panel", piscina); } catch (e) {}
   pintarPiscinas();
   cargar();
+  cargarResumen();
 });
 
 document.addEventListener("click", async ev => {
@@ -924,7 +975,9 @@ iniciarMapa();
 cargar();
 cargarDispositivos();
 cargarAlarmas();
+cargarResumen();
 setInterval(() => { cargar(); cargarDispositivos(); cargarAlarmas(); }, 10000);
+setInterval(cargarResumen, 60000);
 </script>
 </body></html>"""
 
@@ -984,6 +1037,71 @@ async def ubicar_dispositivo(nombre: str, request: Request, token: str = Query(d
             (nombre, lat, lng, descripcion),
         )
     return {"ok": True, "nombre": nombre, "lat": lat, "lng": lng}
+
+
+UTC_OFFSET_HORAS = float(os.environ.get("STATS_UTC_OFFSET", "-5") or -5)  # Ecuador
+
+
+@app.get("/api/stats")
+def stats(dias: int = Query(default=7, ge=1, le=90), dispositivo: str = Query(default="")):
+    """Resumen por día (hora local) y piscina: mín/máx/promedio de OD y temperatura."""
+    corrimiento = f"{UTC_OFFSET_HORAS:+g} hours"
+    sql = f"""
+        SELECT date(recibido_en, ?) fecha, dispositivo, COUNT(*) n,
+               MIN(oxigeno_disuelto) od_min, MAX(oxigeno_disuelto) od_max,
+               AVG(oxigeno_disuelto) od_prom,
+               MIN(temperatura) temp_min, MAX(temperatura) temp_max,
+               AVG(temperatura) temp_prom
+        FROM lecturas
+        WHERE date(recibido_en, ?) >= date('now', ?, ?)
+          AND (oxigeno_disuelto IS NOT NULL OR temperatura IS NOT NULL)
+    """
+    params: list = [corrimiento, corrimiento, corrimiento, f"-{dias - 1} days"]
+    if dispositivo:
+        sql += " AND dispositivo = ?"
+        params.append(dispositivo)
+    sql += " GROUP BY fecha, dispositivo ORDER BY fecha DESC, dispositivo"
+    with db() as con:
+        filas = [dict(f) for f in con.execute(sql, params)]
+    return {"dias": filas}
+
+
+@app.get("/api/export.csv")
+def export_csv(since: str = Query(default=""), hasta: str = Query(default=""),
+               dispositivo: str = Query(default="")):
+    """Histórico en CSV (se abre directo en Excel)."""
+    import csv
+    import io
+    sql = ("SELECT recibido_en, dispositivo, oxigeno_disuelto, temperatura, saturacion"
+           " FROM lecturas")
+    condiciones, params = [], []
+    if since:
+        condiciones.append("recibido_en >= ?")
+        params.append(since)
+    if hasta:
+        condiciones.append("recibido_en <= ?")
+        params.append(hasta)
+    if dispositivo:
+        condiciones.append("dispositivo = ?")
+        params.append(dispositivo)
+    if condiciones:
+        sql += " WHERE " + " AND ".join(condiciones)
+    sql += " ORDER BY id"
+    def _seguro(v):
+        # Neutraliza inyección de fórmulas en Excel (deviceName viene de fuera).
+        if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@", "\t", "\r"):
+            return "'" + v
+        return v
+
+    salida = io.StringIO()
+    w = csv.writer(salida)
+    w.writerow(["recibido_en", "dispositivo", "oxigeno_disuelto_mg_l", "temperatura_c", "saturacion_pct"])
+    with db() as con:
+        for f in con.execute(sql, params):
+            w.writerow([_seguro(f["recibido_en"]), _seguro(f["dispositivo"]),
+                        f["oxigeno_disuelto"], f["temperatura"], f["saturacion"]])
+    return Response(salida.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=lecturas_sonda.csv"})
 
 
 @app.get("/api/alarmas")

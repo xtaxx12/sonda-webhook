@@ -180,3 +180,50 @@ def test_enviar_pendientes_conserva_si_falla(tmp_path):
     enviadas = enviar_pendientes(ruta, "http://127.0.0.1:1/usr/webhook", "tok", timeout=0.5)
     assert enviadas == 0
     assert len(pendientes(ruta)) == 1
+
+
+# --- Registro de fallos y redondeo -------------------------------------------
+
+def test_encolar_redondea_a_centesimas(tmp_path):
+    ruta = str(tmp_path / "buffer.db")
+    preparar_buffer(ruta)
+    encolar(ruta, {"oxigeno_disuelto": 3.6567891, "temperatura": 26.294828, "saturacion": 45.51000213})
+    fila = pendientes(ruta)[0]
+    assert fila[2] == pytest.approx(3.66)
+    assert fila[3] == pytest.approx(26.29)
+    assert fila[4] == pytest.approx(45.51)
+
+
+def test_fallo_queda_registrado_y_se_envia(tmp_path):
+    """Cuando la sonda no responde, se guarda una fila con el motivo y llega al webhook."""
+    import http.server
+
+    recibidas = []
+
+    class Receptor(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            cuerpo = self.rfile.read(int(self.headers["Content-Length"]))
+            recibidas.append(json.loads(cuerpo))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Receptor)
+    puerto = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    ruta = str(tmp_path / "buffer.db")
+    preparar_buffer(ruta)
+    encolar(ruta, None, error="sonda sin respuesta (timeout)")
+
+    enviadas = enviar_pendientes(ruta, f"http://127.0.0.1:{puerto}/usr/webhook", "tok")
+    srv.shutdown()
+
+    assert enviadas == 1 and pendientes(ruta) == []
+    cuerpo = recibidas[0]
+    assert cuerpo["error"] == "sonda sin respuesta (timeout)"
+    assert "Temperature" not in cuerpo
+    assert cuerpo["deviceName"] and cuerpo["time"]

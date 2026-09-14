@@ -161,9 +161,14 @@ Los tests del protocolo y del colector están en `test_modbus.py`
 
 ## Probarlo en local
 
+`AUTH_TOKEN` es obligatorio: sin él, el webhook responde 503 y no acepta
+lecturas (evita inyecciones y alarmas falsas). Guarda la base fuera de
+directorios temporales:
+
 ```bash
 pip install -r requirements.txt
-DB_PATH=./readings.db AUTH_TOKEN=prueba uvicorn main:app --reload --port 8000
+mkdir -p ~/sonda-datos
+DB_PATH=~/sonda-datos/readings.db AUTH_TOKEN=prueba uvicorn main:app --reload --port 8000
 
 curl -X POST "http://localhost:8000/usr/webhook?token=prueba" \
   -H 'Content-Type: application/json' \
