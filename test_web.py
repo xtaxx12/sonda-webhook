@@ -446,3 +446,36 @@ def test_panel_trae_la_vista_de_conjunto(cliente):
     # El color del marcador sale de la zona, no de la conectividad.
     assert "COLOR_ZONA" in html
     assert '"#008300"' not in html
+
+
+# --- Registro de sondas desde la interfaz ------------------------------------
+
+def test_registrar_sonda_sin_ubicacion(cliente):
+    """Se puede dar de alta una sonda solo con nombre y descripción."""
+    r = cliente.put("/api/dispositivos/piscina-3?token=prueba",
+                    json={"descripcion": "Piscina nueva del fondo"})
+    assert r.status_code == 200
+    lista = cliente.get("/api/dispositivos").json()["dispositivos"]
+    assert len(lista) == 1
+    assert lista[0]["nombre"] == "piscina-3"
+    assert lista[0]["descripcion"] == "Piscina nueva del fondo"
+    assert lista[0]["lat"] is None and lista[0]["ultima"] is None
+
+
+def test_actualizar_descripcion_conserva_ubicacion(cliente):
+    cliente.put("/api/dispositivos/piscina-3?token=prueba",
+                json={"lat": -2.19, "lng": -79.88, "descripcion": "vieja"})
+    cliente.put("/api/dispositivos/piscina-3?token=prueba",
+                json={"descripcion": "nueva"})
+    d = cliente.get("/api/dispositivos").json()["dispositivos"][0]
+    assert d["descripcion"] == "nueva"
+    assert d["lat"] == pytest.approx(-2.19)
+
+
+def test_lat_sin_lng_es_error(cliente):
+    r = cliente.put("/api/dispositivos/piscina-3?token=prueba", json={"lat": -2.19})
+    assert r.status_code == 422
+
+
+def test_home_tiene_boton_registrar(cliente):
+    assert 'id="btn-registrar"' in cliente.get("/").text

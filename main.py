@@ -585,7 +585,8 @@ PAGINA = """<!doctype html>
   <div class="bloque">
     <div class="mapa-cab">
       <h2 style="font-size:.72rem;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--tinta2);margin:0">Ubicación de los módulos</h2>
-      <span style="display:flex;gap:.4rem">
+      <span style="display:flex;gap:.4rem;flex-wrap:wrap">
+        <button id="btn-registrar" title="Da de alta una sonda nueva con su nombre y descripción">➕ Registrar sonda</button>
         <button id="btn-gps" title="Usa el GPS de este dispositivo: párate junto al módulo y púlsalo">📡 Mi ubicación</button>
         <button id="btn-ubicar" title="Haz clic aquí y luego en el mapa para fijar dónde está el módulo">📍 En el mapa</button>
       </span>
@@ -1031,6 +1032,31 @@ function iniciarMapa() {
     ubicando ? terminarUbicar() : empezarUbicar();
   });
 
+  // Alta de una sonda nueva: nombre + descripción, y opcionalmente su punto.
+  document.getElementById("btn-registrar").addEventListener("click", async () => {
+    const nombre = (prompt(
+      "Nombre de la sonda nueva.\\n\\nIMPORTANTE: debe ser EXACTAMENTE el mismo " +
+      "SONDA_NOMBRE (deviceName) con el que reportará su agente, p. ej. piscina-2:") || "").trim();
+    if (!nombre) return;
+    if (dispositivos.some(d => d.nombre === nombre)) {
+      alert(`«${nombre}» ya existe.`); return;
+    }
+    const descripcion = prompt("Descripción (p. ej. «Piscina 2, sector norte»):", "") || "";
+    const token = localStorage.getItem("token_panel") || prompt("Token de la app (AUTH_TOKEN):") || "";
+    const r = await fetch(`/api/dispositivos/${encodeURIComponent(nombre)}?token=${encodeURIComponent(token)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ descripcion }),
+    });
+    if (r.status === 401) { localStorage.removeItem("token_panel"); alert("Token inválido."); return; }
+    if (!r.ok) { alert("No se pudo registrar."); return; }
+    try { localStorage.setItem("token_panel", token); } catch (e) {}
+    await cargarDispositivos();
+    if (confirm(`«${nombre}» registrada. ¿La ubicamos ahora en el mapa?\\n(Haz clic donde está.)`)) {
+      nombrePendiente = nombre;
+      empezarUbicar();
+    }
+  });
+
   // GPS del navegador: párate junto al módulo y pulsa el botón.
   document.getElementById("btn-gps").addEventListener("click", () => {
     if (!navigator.geolocation) {
@@ -1060,10 +1086,14 @@ function iniciarMapa() {
   });
 }
 
+let nombrePendiente = "";   // sonda recién registrada, a la espera de su punto en el mapa
+
 async function ubicarModulo(lat, lng) {
   const nombres = dispositivos.map(d => d.nombre);
-  const nombre = nombres.length === 1 ? nombres[0]
-    : prompt(`¿Qué módulo ubicas aquí?\\n(${nombres.join(", ") || "escribe el nombre"})`, nombres[0] || "");
+  const nombre = nombrePendiente ||
+    (nombres.length === 1 ? nombres[0]
+      : prompt(`¿Qué módulo ubicas aquí?\\n(${nombres.join(", ") || "escribe el nombre"})`, nombres[0] || ""));
+  nombrePendiente = "";
   if (!nombre) return false;
   const descripcion = prompt("Descripción del punto (opcional, p. ej. «Piscina 1»):",
     (dispositivos.find(d => d.nombre === nombre) || {}).descripcion || "") || "";
@@ -1189,7 +1219,9 @@ document.getElementById("btn-umbrales").addEventListener("click", async () => {
 
 function pintarPiscinas() {
   const cont = document.getElementById("piscinas");
-  const nombres = dispositivos.filter(d => d.ultima).map(d => d.nombre);
+  // Primero las que reportan; las registradas sin datos también cuentan.
+  const orden = [...dispositivos].sort((a, b) => (b.ultima ? 1 : 0) - (a.ultima ? 1 : 0));
+  const nombres = orden.map(d => d.nombre);
   if (nombres.length < 2) {           // una sola sonda: sin selector
     cont.hidden = true;
     if (piscina && !nombres.includes(piscina)) { piscina = ""; }
@@ -1296,17 +1328,25 @@ async def ubicar_dispositivo(nombre: str, request: Request, token: str = Query(d
             raise HTTPException(status_code=401, detail="token inválido")
 
     cuerpo = await request.json()
-    try:
-        lat, lng = float(cuerpo["lat"]), float(cuerpo["lng"])
-    except (KeyError, TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="lat y lng numéricos requeridos")
-    descripcion = str(cuerpo.get("descripcion", "") or "")
+    lat, lng = cuerpo.get("lat"), cuerpo.get("lng")
+    if (lat is None) != (lng is None):
+        raise HTTPException(status_code=422, detail="lat y lng van juntos")
+    if lat is not None:
+        try:
+            lat, lng = float(lat), float(lng)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="lat y lng deben ser numéricos")
+    descripcion = None if "descripcion" not in cuerpo else str(cuerpo.get("descripcion") or "")
 
+    # Los campos que no vienen en el cuerpo se conservan: así se puede
+    # registrar una sonda solo con descripción, o reubicarla sin tocarla.
     with _lock, db() as con:
         con.execute(
             """INSERT INTO dispositivos (nombre, lat, lng, descripcion) VALUES (?, ?, ?, ?)
-               ON CONFLICT(nombre) DO UPDATE SET lat=excluded.lat, lng=excluded.lng,
-                                                 descripcion=excluded.descripcion""",
+               ON CONFLICT(nombre) DO UPDATE SET
+                 lat         = COALESCE(excluded.lat, dispositivos.lat),
+                 lng         = COALESCE(excluded.lng, dispositivos.lng),
+                 descripcion = COALESCE(excluded.descripcion, dispositivos.descripcion)""",
             (nombre, lat, lng, descripcion),
         )
     return {"ok": True, "nombre": nombre, "lat": lat, "lng": lng}

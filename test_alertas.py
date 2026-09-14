@@ -124,3 +124,18 @@ def test_telegram_envia(monkeypatch):
     assert "bottok123" in path and path.endswith("/sendMessage")
     assert cuerpo["chat_id"] == "999"
     assert cuerpo["text"] == "⚠ prueba"
+
+
+def test_fallos_no_evitan_alarma_de_muda(con):
+    """Sonda muerta + agente vivo = filas de fallo (od None). Debe alarmar igual."""
+    alertas.evaluar_lectura(con, "piscina-1", 6.0, T0)
+    # El agente sigue reportando, pero solo fallos:
+    alertas.evaluar_lectura(con, "piscina-1", None, T0 + timedelta(minutes=5))
+    alertas.evaluar_lectura(con, "piscina-1", None, T0 + timedelta(minutes=11))
+    avisos = alertas.revisar_mudas(con, T0 + timedelta(minutes=12), limite_min=10)
+    assert len(avisos) == 1 and "sin datos" in avisos[0].lower()
+    # Y un fallo más NO la resuelve; una lectura válida sí.
+    assert alertas.evaluar_lectura(con, "piscina-1", None, T0 + timedelta(minutes=13)) == []
+    avisos = alertas.evaluar_lectura(con, "piscina-1", 6.1, T0 + timedelta(minutes=15))
+    assert any("volvió" in a for a in avisos)
+    assert alertas.alarmas_activas(con) == []

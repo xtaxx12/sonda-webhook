@@ -135,15 +135,18 @@ def _mensaje_od(tipo: str, dispositivo: str, od: float, u: dict) -> str:
 def evaluar_lectura(con, dispositivo: str, od: Optional[float], ahora: datetime) -> List[str]:
     """Procesa una lectura nueva. Devuelve los mensajes que hay que notificar."""
     avisos: List[str] = []
+
+    # Una fila de fallo (od None) NO cuenta como señal de vida de la sonda:
+    # el agente puede estar vivo con la sonda muerta, y eso debe alarmar igual.
+    if od is None:
+        return avisos
+
     registrar_ultima(con, dispositivo, ahora)
 
     muda = _activa(con, dispositivo, ("sin_datos",))
     if muda:
         _resolver(con, muda["id"], ahora)
         avisos.append(f"✅ {dispositivo} volvió a reportar")
-
-    if od is None:
-        return avisos
 
     u = umbrales_de(con, dispositivo)
     activa = _activa(con, dispositivo, ("od_bajo", "od_critico"))
