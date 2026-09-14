@@ -1,0 +1,32 @@
+# Cambia "sonda-od" por el nombre que quieras darle a la app.
+app = "sonda-od"
+primary_region = "gru"          # São Paulo, la región más cercana a Ecuador disponible
+
+[build]
+
+[env]
+  DB_PATH = "/data/readings.db"
+
+# Volumen para que las lecturas sobrevivan a los despliegues.
+# Créalo antes del primer deploy con:
+#   fly volumes create datos --size 1 --region gru
+[[mounts]]
+  source      = "datos"
+  destination = "/data"
+
+[http_service]
+  internal_port        = 8080
+  force_https          = true
+  auto_stop_machines   = false   # importante: no apagar, o se pierden webhooks
+  auto_start_machines  = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout  = "5s"
+    method   = "GET"
+    path     = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
