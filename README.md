@@ -6,6 +6,10 @@ y las expone por HTTP. Pensado para desplegarse en Fly.io.
 USR Cloud sigue funcionando igual — el dashboard, el historial y las alarmas
 de la plataforma no se tocan. Esto es una copia paralela de los datos.
 
+> **¿Vas a instalarlo en otra PC o en una Raspberry?** Sigue la guía paso a
+> paso en [INSTALACION.md](INSTALACION.md) (Windows, macOS y Linux, con
+> arranque automático y solución de problemas).
+
 ---
 
 ## 1. Desplegar en Fly
