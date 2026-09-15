@@ -99,6 +99,9 @@ def init_db() -> None:
             )
         """)
         con.execute("CREATE INDEX IF NOT EXISTS ix_recibido ON lecturas(recibido_en)")
+        cols = {f["name"] for f in con.execute("PRAGMA table_info(lecturas)")}
+        if "manipulacion" not in cols:
+            con.execute("ALTER TABLE lecturas ADD COLUMN manipulacion INTEGER DEFAULT 0")
         con.execute("""
             CREATE TABLE IF NOT EXISTS dispositivos (
                 nombre      TEXT PRIMARY KEY,
@@ -232,13 +235,16 @@ MODBUS_REGISTRO = os.environ.get("MODBUS_REGISTRO", "").strip()
 
 async def guardar_lectura_modbus(campos: dict, dispositivo: Optional[str]) -> None:
     """Guarda una lectura obtenida por sondeo Modbus en la misma tabla."""
-    ahora = datetime.now(timezone.utc).isoformat()
+    marca = datetime.now(timezone.utc)
+    ahora = marca.isoformat()
     payload = json.dumps({"origen": "modbus_tcp", "dispositivo": dispositivo, **campos})
     with _lock, db() as con:
+        manipulada = _es_manipulacion(con, dispositivo, marca, campos.get("temperatura"))
         con.execute(
             """INSERT INTO lecturas
-               (recibido_en, medido_en, dispositivo, oxigeno_disuelto, temperatura, saturacion, payload)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (recibido_en, medido_en, dispositivo, oxigeno_disuelto, temperatura,
+                saturacion, payload, manipulacion)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 ahora,
                 ahora,  # aquí la medición es nuestra, no diferida por la nube
@@ -247,9 +253,13 @@ async def guardar_lectura_modbus(campos: dict, dispositivo: Optional[str]) -> No
                 None if campos.get("temperatura") is None else round(campos["temperatura"], 2),
                 None if campos.get("saturacion") is None else round(campos["saturacion"], 2),
                 payload,
+                1 if manipulada else 0,
             ),
         )
-    _procesar_alarmas(dispositivo, campos.get("oxigeno_disuelto"))
+    # Sin esto, cada vez que alguien saca la sonda del agua llega un Telegram
+    # de "oxígeno crítico". Tres de esos y la gente deja de mirar las alarmas.
+    if not manipulada:
+        _procesar_alarmas(dispositivo, campos.get("oxigeno_disuelto"))
 
 
 async def _arrancar_modbus() -> None:
@@ -300,13 +310,16 @@ async def webhook(request: Request, token: str = Query(default="")):
         payload = {"_texto_plano": texto}
 
     campos = extraer(payload)
-    ahora = datetime.now(timezone.utc).isoformat()
+    marca = datetime.now(timezone.utc)
+    ahora = marca.isoformat()
 
     with _lock, db() as con:
+        manipulada = _es_manipulacion(con, campos["dispositivo"], marca, campos["temperatura"])
         con.execute(
             """INSERT INTO lecturas
-               (recibido_en, medido_en, dispositivo, oxigeno_disuelto, temperatura, saturacion, payload)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (recibido_en, medido_en, dispositivo, oxigeno_disuelto, temperatura,
+                saturacion, payload, manipulacion)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 ahora,
                 campos["medido_en"],
@@ -315,10 +328,12 @@ async def webhook(request: Request, token: str = Query(default="")):
                 campos["temperatura"],
                 campos["saturacion"],
                 texto[:20000],
+                1 if manipulada else 0,
             ),
         )
 
-    _procesar_alarmas(campos["dispositivo"], campos["oxigeno_disuelto"])
+    if not manipulada:
+        _procesar_alarmas(campos["dispositivo"], campos["oxigeno_disuelto"])
     return {"ok": True, "recibido_en": ahora, "extraido": campos}
 
 
@@ -350,7 +365,8 @@ def latest(dispositivo: str = Query(default="")):
 @app.get("/api/readings")
 def readings(limit: int = Query(default=100, ge=1, le=20000), since: str = Query(default=""),
              dispositivo: str = Query(default="")):
-    sql = "SELECT id, recibido_en, medido_en, dispositivo, oxigeno_disuelto, temperatura, saturacion FROM lecturas"
+    sql = ("SELECT id, recibido_en, medido_en, dispositivo, oxigeno_disuelto,"
+           " temperatura, saturacion, COALESCE(manipulacion, 0) manipulacion FROM lecturas")
     condiciones, params = [], []
     if since:
         condiciones.append("recibido_en >= ?")
@@ -406,12 +422,26 @@ PAGINA = """<!doctype html>
     --s-od:#3987e5; --s-temp:#d95926; --s-sat:#199e70;
   } }
   [hidden] { display:none !important; }  /* que hidden gane a display:flex */
-  h1 { font-size:1.15rem; font-weight:600; letter-spacing:-.01em; margin:0 0 1.25rem; }
+  .cabecera { display:flex; justify-content:space-between; align-items:baseline;
+              flex-wrap:wrap; gap:.35rem 1rem; margin:0 0 1.25rem; }
+  h1 { font-size:1.15rem; font-weight:600; letter-spacing:-.01em; margin:0; }
+  .cab-estado { display:flex; gap:.9rem; align-items:baseline; flex-wrap:wrap; font-size:.8rem; color:var(--tinta2); }
+  .salud { font-weight:500; }
+  .salud[data-nivel=ok]   { color:var(--z-ok); }
+  .salud[data-nivel=mal]  { color:var(--aviso); }
+  .reloj { font-variant-numeric:tabular-nums; }
   .grid { display:grid; gap:.75rem; grid-template-columns:repeat(2,1fr); }
   .tarjeta.principal { grid-column:1/-1; }
   .tarjeta.principal .valor { font-size:2.9rem; line-height:1.05; }
   .tarjeta.principal[data-zona=aviso]   .valor { color:var(--z-aviso); }
   .tarjeta.principal[data-zona=critico] .valor { color:var(--z-crit); }
+  /* Un dato frío no debe verse tan vivo como uno de hace cinco segundos:
+     la cifra grande es lo que capta la vista periférica. */
+  .tarjeta.principal[data-zona=sin_datos] .valor,
+  .tarjeta.principal[data-zona=manipulacion] .valor,
+  .tarjeta.principal[data-zona=sin_datos] + .tendencia { opacity:.45; }
+  .tarjeta.principal[data-zona=sin_datos] .valor { text-decoration:line-through;
+      text-decoration-thickness:1px; text-decoration-color:var(--tinta2); }
   .tarjeta { background:var(--tarjeta); border:1px solid var(--borde); border-radius:.6rem; padding:1rem 1.1rem; }
   .tarjeta h2 { font-size:.72rem; font-weight:500; text-transform:uppercase;
                 letter-spacing:.06em; color:var(--tinta2); margin:0 0 .4rem;
@@ -452,6 +482,7 @@ PAGINA = """<!doctype html>
   .estado[data-zona=normal]  { border-color:var(--z-ok);    color:var(--z-ok); }
   .estado[data-zona=aviso]   { border-color:var(--z-aviso); color:var(--z-aviso); background:var(--z-aviso-bg); }
   .estado[data-zona=critico] { border-color:var(--z-crit);  color:var(--z-crit);  background:var(--z-crit-bg); }
+  .estado[data-zona=manipulacion] { border-color:var(--aviso); color:var(--aviso); }
   .estado[data-frio=si] { border-color:var(--aviso); color:var(--aviso); }
   .estado[data-zona=critico] .pill { animation:latido 1.4s ease-in-out infinite; }
   @keyframes latido { 50% { opacity:.4 } }
@@ -492,8 +523,30 @@ PAGINA = """<!doctype html>
   .banda-crit  { fill:var(--z-crit);  opacity:.13; }
   .banda-aviso { fill:var(--z-aviso); opacity:.11; }
   .banda-noche { fill:var(--tinta);   opacity:.055; }
+  .banda-manip { fill:var(--aviso);   opacity:.16; }
+  .etq-manip   { font-size:9px; fill:var(--aviso); }
   .linea-umbral { stroke:var(--z-crit); stroke-width:1; stroke-dasharray:4 3; opacity:.6; }
   .etq-umbral { font-size:9px; fill:var(--z-crit); opacity:.85; }
+
+  /* Escritorio: a 46rem centradas, una pantalla de 1900px deja el 60% en negro.
+     A partir de 1100px el cuerpo pasa a dos columnas y solo las piezas de
+     estado siguen ocupando el ancho completo. */
+  @media (min-width: 1100px) {
+    body { max-width: 76rem; display:grid; gap:0 .75rem;
+           grid-template-columns: repeat(2, minmax(0, 1fr));
+           align-content: start; }
+    body > .cabecera, body > #alarmas, body > #piscinas, body > #finca,
+    body > .estado, body > #tarjetas, body > #meta, body > #rangos,
+    body > details, body > nav, body > noscript { grid-column: 1 / -1; }
+    body > .bloque { grid-column: auto; margin-bottom:.75rem; }
+    [data-grafica] svg { height:170px; }
+    #mapa { height:100%; min-height:320px; }
+    /* El mapa y el resumen conviven bien uno al lado del otro. */
+    body > .bloque:has(#mapa) { grid-row: span 1; }
+  }
+  @media (min-width: 1500px) {
+    body { max-width: 92rem; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
 
   #tooltip { position:fixed; pointer-events:none; background:var(--tarjeta); color:var(--tinta);
              border:1px solid var(--borde); border-radius:.45rem; padding:.5rem .7rem;
@@ -505,10 +558,14 @@ PAGINA = """<!doctype html>
   #mapa.ubicando { cursor:crosshair; }
   .leaflet-container { background:var(--fondo); font:inherit; }
   @media (prefers-color-scheme: dark) {
-    #mapa .leaflet-layer, #mapa .leaflet-control-zoom, #mapa .leaflet-control-attribution
+    /* Solo el mapa de calles se invierte; una foto satelital invertida no sirve. */
+    #mapa .leaflet-layer.capa-osm, #mapa .leaflet-control-zoom, #mapa .leaflet-control-attribution
       { filter: invert(1) hue-rotate(180deg) brightness(.9) contrast(.9); }
     .leaflet-popup-content-wrapper, .leaflet-popup-tip { background:var(--tarjeta); color:var(--tinta); }
+    .leaflet-control-layers { background:var(--tarjeta); color:var(--tinta); border-color:var(--borde); }
   }
+  .leaflet-control-layers { font:inherit; font-size:.78rem; border-radius:.45rem; }
+  .leaflet-control-layers label { display:flex; align-items:center; gap:.3em; margin:.15em 0; }
   .mapa-cab { display:flex; justify-content:space-between; align-items:center; margin-bottom:.5rem; }
   .mapa-cab button { font:inherit; font-size:.8rem; padding:.3rem .8rem; border-radius:1rem;
                      border:1px solid var(--borde); background:var(--tarjeta); color:var(--tinta); cursor:pointer; }
@@ -531,7 +588,13 @@ PAGINA = """<!doctype html>
   nav a { color:inherit; margin-right:1rem; }
 </style></head>
 <body>
-  <h1>Sonda de oxígeno disuelto</h1>
+  <div class="cabecera">
+    <h1>Sonda de oxígeno disuelto</h1>
+    <div class="cab-estado">
+      <span id="salud" class="salud">○ Conectando…</span>
+      <span id="reloj" class="reloj" title="Hora local de Ecuador (UTC−5)">— (UTC−5)</span>
+    </div>
+  </div>
 
   <div id="alarmas" hidden></div>
 
@@ -655,7 +718,7 @@ const fmtHora = t => t.toLocaleTimeString("es", { hour: "2-digit", minute: "2-di
 
 const COLOR_ZONA = {
   normal: "--z-ok", aviso: "--z-aviso", critico: "--z-crit",
-  sin_datos: "--tinta2", desconocida: "--tinta2",
+  sin_datos: "--tinta2", manipulacion: "--tinta2", desconocida: "--tinta2",
 };
 const cssVar = n => getComputedStyle(document.body).getPropertyValue(n).trim() || "#888";
 
@@ -671,6 +734,34 @@ function chispa(valores, color) {
          `vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
 }
 
+// --- Salud del sistema y reloj (cabecera) -------------------------------------
+// "En línea" se deriva de la frescura de las lecturas: si todas las sondas
+// reportaron hace menos de 90 s, el agente y la red están vivos.
+function actualizarSalud(lista) {
+  const el = document.getElementById("salud");
+  if (!lista.length) { el.textContent = "○ Sin sondas todavía"; el.dataset.nivel = ""; return; }
+  // La zona ya viene decidida por el servidor; un umbral propio aquí haría
+  // que la cabecera y la franja discreparan durante unos segundos.
+  const mudas = lista.filter(p => p.zona === "sin_datos");
+  if (mudas.length) {
+    el.textContent = `⚠ ${mudas.length === 1 ? mudas[0].nombre + " sin datos" : mudas.length + " sondas sin datos"}`;
+    el.dataset.nivel = "mal";
+  } else {
+    el.textContent = `● Sistema en línea · ${lista.length === 1 ? "sonda reportando" : lista.length + " sondas reportando"}`;
+    el.dataset.nivel = "ok";
+  }
+}
+
+const FMT_RELOJ = new Intl.DateTimeFormat("es-EC", {
+  timeZone: "America/Guayaquil", weekday: "short", day: "numeric", month: "short",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+function actualizarReloj() {
+  document.getElementById("reloj").textContent = FMT_RELOJ.format(new Date()) + " (UTC−5)";
+}
+actualizarReloj();
+setInterval(actualizarReloj, 1000);
+
 // Vista de conjunto: con doce piscinas, entrar viendo el detalle de una
 // —la de lectura más reciente, que era el criterio— responde la pregunta
 // equivocada. Primero cuál necesita atención; el detalle después.
@@ -679,6 +770,7 @@ async function cargarFinca() {
   try { j = await (await fetch("/api/estados")).json(); } catch (e) { return; }
   const lista = j.piscinas || [];
   finca = Object.fromEntries(lista.map(p => [p.dispositivo, p]));
+  actualizarSalud(lista);
 
   const cont = document.getElementById("finca");
   if (lista.length < 2) { cont.hidden = true; return; }   // una sola: sería ruido
@@ -729,6 +821,8 @@ const ETIQUETA_ZONA = {
   normal:  "Oxígeno normal",
   aviso:   "Oxígeno bajo",
   critico: "Oxígeno crítico",
+  sin_datos: "Sin datos recientes",
+  manipulacion: "Sonda en manipulación",
   desconocida: "Sin lectura de oxígeno",
 };
 
@@ -758,14 +852,14 @@ async function cargarEstado() {
   franja.dataset.zona = e.zona;
   // Un dato viejo no es un estado: si la sonda lleva rato muda, eso es lo
   // que hay que gritar, no el último valor que se alcanzó a leer.
-  const frio = e.edad_segundos !== null && e.edad_segundos > 180;
+  const frio = e.zona === "sin_datos" || e.zona === "manipulacion";
   franja.dataset.frio = frio ? "si" : "no";
   document.getElementById("estado-txt").textContent =
-    frio ? "Sin datos recientes" : ETIQUETA_ZONA[e.zona] || e.zona;
+    ETIQUETA_ZONA[e.zona] || e.zona;
   document.getElementById("frescura").textContent =
     haceCuanto(e.edad_segundos) + (e.dispositivo ? ` · ${e.dispositivo}` : "");
 
-  tarjeta.dataset.zona = frio ? "desconocida" : e.zona;
+  tarjeta.dataset.zona = e.zona;
 
   const partes = [];
   const p = e.pendiente_od_hora;
@@ -895,6 +989,28 @@ function dibujar(serie) {
     }
   }
 
+  // Tramos con la sonda fuera del agua: sin marcarlos, una caída a 0.3 mg/L
+  // por manipulación se lee igual que una asfixia real.
+  {
+    let ini = null;
+    for (let i = 0; i <= datos.length; i++) {
+      const m = i < datos.length && datos[i].manipulacion;
+      if (m && ini === null) ini = datos[i].t.getTime();
+      if (!m && ini !== null) {
+        const fin = datos[i - 1].t.getTime();
+        const x0 = Math.max(padL, x(ini)), x1 = Math.min(w - padR, x(fin));
+        if (x1 > x0 + 0.5) {
+          svg += `<rect class="banda-manip" x="${x0.toFixed(1)}" y="${padT}" ` +
+                 `width="${(x1 - x0).toFixed(1)}" height="${h - padT - padB}"/>`;
+          if (esOD && x1 - x0 > 46)
+            svg += `<text class="etq-manip" x="${((x0 + x1) / 2).toFixed(1)}" ` +
+                   `y="${padT + 9}" text-anchor="middle">manipulación</text>`;
+        }
+        ini = null;
+      }
+    }
+  }
+
   // Bandas de umbral: el número solo no dice si 6.1 mg/L está bien o mal.
   if (esOD && umbrales) {
     const piso = h - padB;
@@ -1017,10 +1133,30 @@ function iniciarMapa() {
     return;
   }
   mapa = L.map("mapa").setView([-1.8, -78.5], 6);   // Ecuador por defecto
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(mapa);
+
+  // Satélite (Esri World Imagery, sin API key) + nombres de lugares encima.
+  // En una camaronera las piscinas se ven desde el aire; es la base por defecto.
+  const satelite = L.layerGroup([
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+      { maxZoom: 19, attribution: "Imágenes © Esri, Maxar, Earthstar Geographics" }),
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+      { maxZoom: 19, className: "capa-etiquetas", pane: "overlayPane" }),
+  ]);
+  // Calles (OpenStreetMap). Solo esta capa se invierte en modo oscuro.
+  const calles = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    { maxZoom: 19, attribution: "© OpenStreetMap", className: "capa-osm" });
+
+  let baseGuardada = "satelite";
+  try { baseGuardada = localStorage.getItem("mapa_base") || "satelite"; } catch (e) {}
+  (baseGuardada === "calles" ? calles : satelite).addTo(mapa);
+  L.control.layers({ "Satélite": satelite, "Mapa": calles }, null,
+    { position: "topright", collapsed: false }).addTo(mapa);
+  mapa.on("baselayerchange", ev => {
+    try { localStorage.setItem("mapa_base", ev.name === "Mapa" ? "calles" : "satelite"); } catch (e) {}
+  });
+
   marcadores = L.layerGroup().addTo(mapa);
-  nota.textContent = "Pulsa «Ubicar módulo» y luego haz clic en el mapa para fijar su posición.";
+  nota.textContent = "Pulsa «En el mapa» y luego haz clic donde está la sonda.";
 
   mapa.on("click", async ev => {
     if (!ubicando) return;
@@ -1120,7 +1256,7 @@ function terminarUbicar() {
   document.getElementById("btn-ubicar").classList.remove("activo");
   document.getElementById("mapa").classList.remove("ubicando");
   document.getElementById("mapa-nota").textContent =
-    "Pulsa «Ubicar módulo» y luego haz clic en el mapa para fijar su posición.";
+    "Pulsa «En el mapa» y luego haz clic donde está la sonda.";
 }
 
 async function cargarDispositivos() {
@@ -1164,7 +1300,7 @@ async function cargarDispositivos() {
   const sinUbicar = dispositivos.filter(d => d.lat === null);
   if (sinUbicar.length && !ubicando) {
     document.getElementById("mapa-nota").textContent =
-      `Sin ubicar: ${sinUbicar.map(d => d.nombre).join(", ")} — pulsa «Ubicar módulo» y haz clic en el mapa.`;
+      `Sin ubicar: ${sinUbicar.map(d => d.nombre).join(", ")} — pulsa «En el mapa» y haz clic donde está.`;
   }
   if (!mapaAjustado && puestos.length) {
     mapaAjustado = true;
@@ -1222,7 +1358,10 @@ function pintarPiscinas() {
   // Primero las que reportan; las registradas sin datos también cuentan.
   const orden = [...dispositivos].sort((a, b) => (b.ultima ? 1 : 0) - (a.ultima ? 1 : 0));
   const nombres = orden.map(d => d.nombre);
-  if (nombres.length < 2) {           // una sola sonda: sin selector
+  // Con ≥2 sondas la rejilla "Todas las piscinas" ya hace de selector;
+  // los chips solo duplicarían. Se conservan para sondas registradas sin datos.
+  const rejillaVisible = !document.getElementById("finca").hidden;
+  if (nombres.length < 2 || rejillaVisible) {
     cont.hidden = true;
     if (piscina && !nombres.includes(piscina)) { piscina = ""; }
     return;
@@ -1368,6 +1507,7 @@ def stats(dias: int = Query(default=7, ge=1, le=90), dispositivo: str = Query(de
         FROM lecturas
         WHERE date(recibido_en, ?) >= date('now', ?, ?)
           AND (oxigeno_disuelto IS NOT NULL OR temperatura IS NOT NULL)
+          AND COALESCE(manipulacion, 0) = 0
     """
     params: list = [corrimiento, corrimiento, corrimiento, f"-{dias - 1} days"]
     if dispositivo:
@@ -1424,7 +1564,8 @@ def api_alarmas(limit: int = Query(default=50, ge=1, le=500)):
                 "historial": alertas.historial(con, limit)}
 
 
-ORDEN_URGENCIA = {"critico": 0, "aviso": 1, "sin_datos": 2, "desconocida": 3, "normal": 4}
+ORDEN_URGENCIA = {"critico": 0, "aviso": 1, "sin_datos": 2, "manipulacion": 3,
+                  "desconocida": 4, "normal": 5}
 
 
 @app.get("/api/estados")
@@ -1443,7 +1584,8 @@ def api_estados():
 
     with db() as con:
         ultimas = con.execute("""
-            SELECT l.dispositivo, l.recibido_en, l.oxigeno_disuelto, l.temperatura, l.saturacion
+            SELECT l.dispositivo, l.recibido_en, l.oxigeno_disuelto, l.temperatura,
+                   l.saturacion, COALESCE(l.manipulacion, 0) manipulacion
             FROM lecturas l
             JOIN (SELECT dispositivo, MAX(id) mid FROM lecturas
                   WHERE dispositivo IS NOT NULL GROUP BY dispositivo) u ON l.id = u.mid
@@ -1462,7 +1604,8 @@ def api_estados():
                    SUM(((strftime('%s', recibido_en) - ?) / 3600.0) *
                        ((strftime('%s', recibido_en) - ?) / 3600.0)) sxx
             FROM lecturas
-            WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL AND dispositivo IS NOT NULL
+            WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL
+              AND dispositivo IS NOT NULL AND COALESCE(manipulacion, 0) = 0
             GROUP BY dispositivo
         """, (base, base, base, base, t_hora.isoformat())):
             n = f["n"]
@@ -1479,7 +1622,8 @@ def api_estados():
             SELECT dispositivo, CAST(strftime('%s', recibido_en) / 900 AS INTEGER) cubo,
                    AVG(oxigeno_disuelto) od
             FROM lecturas
-            WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL AND dispositivo IS NOT NULL
+            WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL
+              AND dispositivo IS NOT NULL AND COALESCE(manipulacion, 0) = 0
             GROUP BY dispositivo, cubo ORDER BY dispositivo, cubo
         """, (t_seis.isoformat(),)):
             chispas.setdefault(f["dispositivo"], []).append(round(f["od"], 2))
@@ -1498,8 +1642,9 @@ def api_estados():
 
             # Una piscina muda no está "normal": está sin datos, que para
             # decidir si te levantas es tan accionable como un aviso.
-            callada = edad is not None and edad > 180
-            zona = "sin_datos" if callada else _zona_od(f["oxigeno_disuelto"], umbrales)
+            zona = _zona_operativa(f["oxigeno_disuelto"], umbrales, edad,
+                                   bool(f["manipulacion"]))
+            callada = zona in ("sin_datos", "manipulacion")
 
             p = pend.get(nombre)
             horas = None
@@ -1531,11 +1676,12 @@ def api_estados():
     ))
 
     resumen = {"total": len(piscinas)}
-    for z in ("critico", "aviso", "sin_datos", "normal", "desconocida"):
+    for z in ("critico", "aviso", "sin_datos", "manipulacion", "normal", "desconocida"):
         n = sum(1 for p in piscinas if p["zona"] == z)
         if n or z in ("critico", "aviso"):
             resumen[z] = n
-    return {"resumen": resumen, "piscinas": piscinas}
+    return {"resumen": resumen, "piscinas": piscinas,
+            "sin_datos_tras_segundos": SEGUNDOS_SIN_DATOS}
 
 
 @app.get("/api/estado")
@@ -1567,28 +1713,32 @@ def api_estado(dispositivo: str = Query(default="")):
         historia = con.execute(
             """SELECT recibido_en, oxigeno_disuelto FROM lecturas
                WHERE recibido_en >= ? AND oxigeno_disuelto IS NOT NULL
+                 AND COALESCE(manipulacion, 0) = 0
                  AND dispositivo IS ? ORDER BY recibido_en""",
             (desde, ult["dispositivo"]),
         ).fetchall()
 
     od = ult["oxigeno_disuelto"]
-    zona = _zona_od(od, umbrales)
-    pendiente = _pendiente_por_hora(historia)
-
-    # Margen: a este ritmo de caída, cuánto falta para tocar el crítico.
-    # Solo tiene sentido si está bajando de verdad; el ruido de la sonda
-    # produce pendientes minúsculas que darían estimaciones absurdas.
-    horas_a_critico = None
-    if pendiente is not None and pendiente < -0.05 and od is not None:
-        margen = od - umbrales["od_critico"]
-        if margen > 0:
-            horas_a_critico = round(margen / -pendiente, 1)
-
     try:
         edad = (datetime.now(timezone.utc)
                 - datetime.fromisoformat(ult["recibido_en"])).total_seconds()
     except (TypeError, ValueError):
         edad = None
+
+    zona = _zona_operativa(od, umbrales, edad, bool(ult["manipulacion"]))
+    pendiente = _pendiente_por_hora(historia)
+
+    # Margen: a este ritmo de caída, cuánto falta para tocar el crítico.
+    # Solo tiene sentido si está bajando de verdad; el ruido de la sonda
+    # produce pendientes minúsculas que darían estimaciones absurdas.
+    # Sin datos frescos no se estima margen: proyectar desde una lectura vieja
+    # da una hora concreta que suena precisa y no significa nada.
+    horas_a_critico = None
+    if (pendiente is not None and pendiente < -0.05 and od is not None
+            and zona not in ("sin_datos", "manipulacion")):
+        margen = od - umbrales["od_critico"]
+        if margen > 0:
+            horas_a_critico = round(margen / -pendiente, 1)
 
     return {
         "hay_datos": True,
@@ -1603,7 +1753,82 @@ def api_estado(dispositivo: str = Query(default="")):
         "edad_segundos": round(edad) if edad is not None else None,
         "medido_en": ult["recibido_en"],
         "muestras_tendencia": len(historia),
+        "sin_datos_tras_segundos": SEGUNDOS_SIN_DATOS,
     }
+
+
+# El agua de una piscina de camarón tarda horas en moverse un grado: un salto
+# de más de esto entre lecturas consecutivas solo puede ser la sonda saliendo o
+# entrando al agua. No es una medición de la piscina.
+GRADIENTE_MANIPULACION = 1.0      # °C por minuto
+DELTA_MINIMO_MANIPULACION = 0.8   # °C absolutos, para que el ruido no dispare
+VENTANA_MANIPULACION = 10 * 60    # s que siguen sospechosos mientras se estabiliza
+
+
+def _es_manipulacion(con, dispositivo: Optional[str], ahora: datetime,
+                     temperatura: Optional[float]) -> bool:
+    """
+    ¿Esta lectura cae dentro de un episodio de manipulación de la sonda?
+
+    Se calcula desde la base y no desde memoria: así sobrevive a un reinicio
+    del servidor a mitad de episodio, que es justo cuando se manipula el equipo.
+    """
+    if temperatura is None:
+        return False
+
+    desde = (ahora - timedelta(seconds=VENTANA_MANIPULACION)).isoformat()
+    previas = con.execute(
+        """SELECT recibido_en, temperatura FROM lecturas
+           WHERE dispositivo IS ? AND recibido_en >= ? AND temperatura IS NOT NULL
+           ORDER BY recibido_en""",
+        (dispositivo, desde),
+    ).fetchall()
+    if not previas:
+        return False
+
+    # Un salto brusco en cualquier punto de la ventana contamina lo que sigue:
+    # tras sacarla del agua, la sonda tarda minutos en volver a equilibrarse.
+    serie = [(f["recibido_en"], f["temperatura"]) for f in previas]
+    serie.append((ahora.isoformat(), temperatura))
+    for i in range(1, len(serie)):
+        try:
+            t0 = datetime.fromisoformat(serie[i - 1][0])
+            t1 = datetime.fromisoformat(serie[i][0])
+        except (TypeError, ValueError):
+            continue
+        minutos = (t1 - t0).total_seconds() / 60
+        if minutos <= 0:
+            continue
+        salto = abs(serie[i][1] - serie[i - 1][1])
+        # Se exigen las dos cosas. Solo con la pendiente, dos lecturas separadas
+        # por un segundo convierten 0.05 °C de ruido del sensor en 3 °C/min.
+        if salto > DELTA_MINIMO_MANIPULACION and salto / minutos > GRADIENTE_MANIPULACION:
+            return True
+    return False
+
+
+# Una lectura más vieja que esto ya no describe el estado del agua. El número
+# vive aquí y se publica en la API: el navegador no debe tener su propia copia,
+# o la cabecera y la franja acaban discrepando unos segundos.
+SEGUNDOS_SIN_DATOS = 180
+
+
+def _zona_operativa(od: Optional[float], umbrales: dict, edad: Optional[float],
+                    manipulada: bool = False) -> str:
+    """
+    Zona que se muestra: la del oxígeno, salvo que el dato esté frío.
+
+    Una piscina muda no está "normal" — está sin datos, y para decidir si te
+    levantas eso es tan accionable como un aviso. Esta función es la única
+    autoridad: la usan los dos endpoints y el panel lee su resultado.
+    """
+    if edad is not None and edad > SEGUNDOS_SIN_DATOS:
+        return "sin_datos"
+    # La sonda fuera del agua mide el aire correctamente; simplemente no está
+    # midiendo la piscina. Decir "crítico" ahí sería una alarma falsa.
+    if manipulada:
+        return "manipulacion"
+    return _zona_od(od, umbrales)
 
 
 def _zona_od(od: Optional[float], umbrales: dict) -> str:

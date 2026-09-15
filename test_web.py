@@ -200,8 +200,10 @@ def test_home_tiene_banner_y_umbrales(cliente):
 # --- Estadísticas y exportación ----------------------------------------------
 
 def test_stats_resumen_diario(cliente):
-    _lectura(cliente, "piscina-1", 26.0, od=3.8)
-    _lectura(cliente, "piscina-1", 28.0, od=6.2)
+    # Temperaturas realistas: dos lecturas seguidas separadas por 2 °C serían
+    # la sonda fuera del agua, y el resumen las excluiría a propósito.
+    _lectura(cliente, "piscina-1", 27.4, od=3.8)
+    _lectura(cliente, "piscina-1", 27.6, od=6.2)
     j = cliente.get("/api/stats?dias=7&dispositivo=piscina-1").json()
     assert len(j["dias"]) == 1
     d = j["dias"][0]
@@ -209,8 +211,8 @@ def test_stats_resumen_diario(cliente):
     assert d["od_min"] == pytest.approx(3.8)
     assert d["od_max"] == pytest.approx(6.2)
     assert d["od_prom"] == pytest.approx(5.0)
-    assert d["temp_min"] == pytest.approx(26.0)
-    assert d["temp_max"] == pytest.approx(28.0)
+    assert d["temp_min"] == pytest.approx(27.4)
+    assert d["temp_max"] == pytest.approx(27.6)
 
 
 def test_stats_filtra_dispositivo(cliente):
@@ -479,3 +481,172 @@ def test_lat_sin_lng_es_error(cliente):
 
 def test_home_tiene_boton_registrar(cliente):
     assert 'id="btn-registrar"' in cliente.get("/").text
+
+
+def test_home_tiene_mapa_satelital_con_selector(cliente):
+    html = cliente.get("/").text
+    assert "World_Imagery" in html            # tiles satelitales de Esri
+    assert "control.layers" in html           # selector Satélite / Mapa
+    assert "tile.openstreetmap.org" in html   # el mapa de calles sigue disponible
+
+
+def test_home_tiene_salud_del_sistema_y_reloj(cliente):
+    html = cliente.get("/").text
+    assert 'id="salud"' in html      # sistema/agente en línea o sondas sin datos
+    assert 'id="reloj"' in html      # hora local con zona horaria explícita
+    assert "UTC" in html
+
+
+# --- Una sola autoridad para la frescura --------------------------------------
+
+def _sembrar_viejo(mod, minutos, od=6.5, dispositivo="piscina-1"):
+    from datetime import datetime, timezone, timedelta
+    t = (datetime.now(timezone.utc) - timedelta(minutes=minutos)).isoformat()
+    with mod.db() as con:
+        con.execute(
+            "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+            " oxigeno_disuelto, temperatura, saturacion, payload)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (t, t, dispositivo, od, 27.5, 83.0, "{}"))
+
+
+def test_estado_singular_tambien_marca_sin_datos(cliente):
+    import main
+    _sembrar_viejo(main, minutos=30)
+    e = cliente.get("/api/estado").json()
+    # Su última lectura fue 6.5 mg/L, pero fue hace media hora.
+    assert e["zona"] == "sin_datos"
+
+
+def test_los_dos_endpoints_coinciden_en_la_zona(cliente):
+    import main
+    _sembrar_viejo(main, minutos=30)
+    uno = cliente.get("/api/estado").json()["zona"]
+    todas = cliente.get("/api/estados").json()["piscinas"][0]["zona"]
+    # Dos fuentes para el mismo hecho garantizan que un día discrepen.
+    assert uno == todas == "sin_datos"
+
+
+def test_no_se_estima_margen_sobre_datos_frios(cliente):
+    import main
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    # Serie descendente clara, pero toda ella de hace más de media hora.
+    with main.db() as con:
+        for i in range(30):
+            t = (ahora - timedelta(minutes=90 - i)).isoformat()
+            od = 6.0 - i * 0.05
+            con.execute(
+                "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+                " oxigeno_disuelto, temperatura, saturacion, payload)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (t, t, "piscina-1", od, 27.5, 70.0, "{}"))
+    e = cliente.get("/api/estado").json()
+    assert e["zona"] == "sin_datos"
+    # Proyectar "llega al crítico en 1.2 h" desde datos viejos suena preciso
+    # y no significa nada.
+    assert e["horas_a_critico"] is None
+
+
+def test_el_umbral_de_frescura_se_publica(cliente):
+    import main
+    _sembrar_viejo(main, minutos=1)
+    assert cliente.get("/api/estado").json()["sin_datos_tras_segundos"] == main.SEGUNDOS_SIN_DATOS
+    assert cliente.get("/api/estados").json()["sin_datos_tras_segundos"] == main.SEGUNDOS_SIN_DATOS
+
+
+def test_el_panel_no_calcula_su_propio_umbral(cliente):
+    html = cliente.get("/").text
+    # El navegador lee la zona que decide el servidor; si vuelve a aparecer un
+    # umbral propio, la cabecera y la franja discreparán otra vez.
+    assert "edad_segundos > 90" not in html
+    assert "edad_segundos > 180" not in html
+
+
+# --- Manipulación de la sonda -------------------------------------------------
+
+def _serie(mod, temps, od=7.0, dispositivo="p1", paso_min=1, desde_min=60):
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    with mod.db() as con:
+        for i, t_c in enumerate(temps):
+            t = (ahora - timedelta(minutes=desde_min - i * paso_min)).isoformat()
+            con.execute(
+                "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+                " oxigeno_disuelto, temperatura, saturacion, payload, manipulacion)"
+                " VALUES (?,?,?,?,?,?,?,0)",
+                (t, t, dispositivo, od, t_c, 90.0, "{}"))
+
+
+def test_detecta_sonda_fuera_del_agua(cliente):
+    import main
+    from datetime import datetime, timezone, timedelta
+    with main.db() as con:
+        ahora = datetime.now(timezone.utc)
+        con.execute(
+            "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+            " oxigeno_disuelto, temperatura, saturacion, payload, manipulacion)"
+            " VALUES (?,?,?,?,?,?,?,0)",
+            *[((ahora - timedelta(minutes=2)).isoformat(),
+               (ahora - timedelta(minutes=2)).isoformat(),
+               "p1", 7.0, 27.5, 90.0, "{}")])
+        # Cinco grados en dos minutos: el agua de una piscina no hace eso.
+        assert main._es_manipulacion(con, "p1", ahora, 32.5) is True
+
+
+def test_el_ruido_del_sensor_no_cuenta_como_manipulacion(cliente):
+    import main
+    from datetime import datetime, timezone, timedelta
+    with main.db() as con:
+        ahora = datetime.now(timezone.utc)
+        hace1s = (ahora - timedelta(seconds=1)).isoformat()
+        con.execute(
+            "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+            " oxigeno_disuelto, temperatura, saturacion, payload, manipulacion)"
+            " VALUES (?,?,?,?,?,?,?,0)",
+            (hace1s, hace1s, "p1", 7.0, 27.50, 90.0, "{}"))
+        # 0.05 °C en un segundo son 3 °C/min de pendiente, pero es ruido:
+        # sin el mínimo absoluto, cada lectura rápida sería una falsa alarma.
+        assert main._es_manipulacion(con, "p1", ahora, 27.55) is False
+
+
+def test_el_resumen_diario_excluye_manipulaciones(cliente):
+    import main
+    _serie(main, [27.5] * 20, od=7.0)              # minutos 60..41
+    _serie(main, [33.0, 31.0, 30.0], od=0.3, desde_min=40)   # contiguas
+    import backfill_manipulacion as bf
+    with main.db() as con:
+        bf.marcar(con, main.GRADIENTE_MANIPULACION,
+                  main.DELTA_MINIMO_MANIPULACION, main.VENTANA_MANIPULACION)
+    d = cliente.get("/api/stats?dispositivo=p1").json()["dias"][0]
+    # El 0.3 mg/L medido en aire no debe aparecer como mínimo del día.
+    assert d["od_min"] == pytest.approx(7.0)
+    assert d["temp_max"] == pytest.approx(27.5)
+
+
+def test_manipulacion_no_dispara_alarma(cliente, monkeypatch):
+    import main
+    avisos = []
+    monkeypatch.setattr(main.alertas, "notificar_telegram", lambda t: avisos.append(t))
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    with main.db() as con:
+        t = (ahora - timedelta(minutes=1)).isoformat()
+        con.execute(
+            "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+            " oxigeno_disuelto, temperatura, saturacion, payload, manipulacion)"
+            " VALUES (?,?,?,?,?,?,?,0)",
+            (t, t, "p1", 7.0, 27.5, 90.0, "{}"))
+    # Sonda fuera del agua: OD de 0.3 con un salto térmico de 5 °C.
+    r = cliente.post("/usr/webhook?token=prueba", json={
+        "deviceName": "p1", "Dissolved_Oxygen": 0.3,
+        "Temperature": 32.5, "DO_Saturation": 3.0})
+    assert r.status_code == 200
+    # Sin esta supresión, sacar la sonda manda un "🔴 CRÍTICO" por Telegram.
+    assert avisos == []
+
+
+def test_la_grafica_sombrea_las_manipulaciones(cliente):
+    html = cliente.get("/").text
+    assert "banda-manip" in html
+    assert "manipulacion" in html
