@@ -406,6 +406,7 @@ def test_estados_resume_la_finca(cliente):
     import main
     _sembrar_finca(main)
     r = cliente.get("/api/estados").json()["resumen"]
+    r.pop("lecturas_hora")
     assert r == {"total": 5, "critico": 1, "aviso": 1, "sin_datos": 1, "normal": 2}
 
 
@@ -650,3 +651,36 @@ def test_la_grafica_sombrea_las_manipulaciones(cliente):
     html = cliente.get("/").text
     assert "banda-manip" in html
     assert "manipulacion" in html
+
+
+# --- Esqueleto de la app: barra lateral, páginas y archivos estáticos --------
+
+PAGINAS = ["inicio", "piscinas", "mapa", "alarmas", "historial",
+           "reportes", "dispositivos", "configuracion"]
+
+
+def test_home_tiene_barra_lateral_con_secciones(cliente):
+    html = cliente.get("/").text
+    for p in PAGINAS:
+        assert f'data-pagina="{p}"' in html, p
+    assert 'href="#/inicio"' in html
+
+
+def test_home_incrusta_css_y_js_de_archivos_propios(cliente):
+    """El panel vive en static/ (editable aparte) pero se sirve en una sola página."""
+    html = cliente.get("/").text
+    assert "<!-- CSS -->" not in html and "<!-- JS -->" not in html
+    assert "function dibujar" in html      # app.js incrustado
+    assert ".lateral" in html              # app.css incrustado
+
+
+def test_home_no_pide_datos_con_prompt(cliente):
+    # Registrar, ubicar y umbrales se hacen con formularios, no con prompt().
+    assert "prompt(" not in cliente.get("/").text
+
+
+def test_estados_cuenta_lecturas_de_la_ultima_hora(cliente):
+    _lectura(cliente, "piscina-1", 26.0, od=5.0)
+    _lectura(cliente, "piscina-1", 26.1, od=5.1)
+    r = cliente.get("/api/estados").json()["resumen"]
+    assert r["lecturas_hora"] == 2

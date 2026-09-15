@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Camaronera · Oxígeno disuelto</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+<script>
+  // Tema antes de pintar, para que no parpadee.
+  try { const t = localStorage.getItem("tema"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<!-- CSS -->
+</head>
+<body>
+<div class="app">
+  <aside class="lateral">
+    <div class="marca"><span class="logo">🦐</span>
+      <span><b>Camaronera</b><small>Monitoreo de oxígeno</small></span></div>
+    <nav class="menu" id="menu">
+      <a href="#/inicio" data-pagina="inicio"><span class="ico">⌂</span>Inicio</a>
+      <a href="#/piscinas" data-pagina="piscinas"><span class="ico">≋</span>Piscinas</a>
+      <a href="#/mapa" data-pagina="mapa"><span class="ico">◎</span>Mapa</a>
+      <a href="#/alarmas" data-pagina="alarmas"><span class="ico">🔔</span>Alarmas
+        <span class="conteo" id="conteo-alarmas" hidden></span></a>
+      <a href="#/historial" data-pagina="historial"><span class="ico">↺</span>Historial</a>
+      <a href="#/reportes" data-pagina="reportes"><span class="ico">▤</span>Reportes</a>
+      <a href="#/dispositivos" data-pagina="dispositivos"><span class="ico">⚙</span>Dispositivos</a>
+      <a href="#/configuracion" data-pagina="configuracion"><span class="ico">✎</span>Configuración</a>
+    </nav>
+    <div class="lateral-pie">
+      <label class="tema"><input type="checkbox" id="tema-oscuro"> Modo oscuro</label>
+      <div class="tarjeta-agente">
+        <div id="salud" class="salud">○ Conectando…</div>
+        <div class="nota" id="salud-nota">Agente de la finca</div>
+      </div>
+    </div>
+  </aside>
+
+  <main class="contenido">
+    <header class="cabecera">
+      <div><h1 id="titulo-pagina">Inicio</h1><p class="sub" id="sub-pagina">Monitoreo en tiempo real del oxígeno disuelto en tus piscinas</p></div>
+      <div class="cab-derecha">
+        <div class="reloj" id="reloj" title="Hora local de Ecuador (UTC−5)"><b>—</b>(UTC−5) Ecuador</div>
+        <a href="#/alarmas" class="campana" title="Alarmas activas">🔔<span class="conteo" id="campana-n" hidden></span></a>
+      </div>
+    </header>
+
+    <!-- ===================== INICIO ===================== -->
+    <section data-pagina="inicio">
+      <div class="franja" id="franja" data-nivel="">
+        <span class="icono" id="franja-icono">○</span>
+        <div class="texto"><b id="franja-titulo">Conectando…</b><span id="franja-sub"></span></div>
+        <div class="datos">
+          <div><b id="franja-ultima">—</b>última actualización</div>
+          <div><b id="franja-lecturas">—</b>lecturas en la última hora</div>
+        </div>
+        <a href="#/alarmas" class="boton">Ver todas las alarmas →</a>
+      </div>
+
+      <div id="alarmas" class="alarmas-activas" hidden></div>
+
+      <p class="nota" id="resumen-finca"></p>
+      <div class="rejilla" id="rejilla"></div>
+
+      <div class="caja" id="detalle-caja">
+        <div class="detalle-cab">
+          <div class="titulo">
+            <h2 id="det-nombre">—</h2>
+            <span class="pill" id="estado" data-zona=""><span id="estado-txt">—</span></span>
+            <select id="piscinas" class="boton" hidden title="Cambiar de piscina"></select>
+            <span class="meta" id="det-meta"></span>
+          </div>
+          <div class="pestanas" id="rangos">
+            <button data-rango="1" class="activo">1 h</button>
+            <button data-rango="6">6 h</button>
+            <button data-rango="24">24 h</button>
+          </div>
+        </div>
+        <div class="detalle">
+          <div class="principal">
+            <div class="tarjeta-od" id="tarjeta-od" data-zona="">
+              <h3><span class="punto" style="background:var(--s-od)"></span>Oxígeno disuelto</h3>
+              <p class="valor" id="v-od">—<span>mg/L</span></p>
+              <div class="tendencia" id="tendencia"></div>
+              <div class="umbrales-mini" id="umbrales-mini"></div>
+            </div>
+            <div class="tiles">
+              <div class="tile"><h3><span class="punto" style="background:var(--s-temp)"></span>Temperatura</h3>
+                <p class="valor" id="v-temp">—<span>°C</span></p></div>
+              <div class="tile"><h3><span class="punto" style="background:var(--s-sat)"></span>Saturación</h3>
+                <p class="valor" id="v-sat">—<span>%</span></p></div>
+            </div>
+          </div>
+          <div class="graficas">
+            <div class="grafica"><header>
+                <h3><span class="punto" style="background:var(--s-od)"></span>Oxígeno disuelto (mg/L)</h3>
+                <span class="leyenda"><span class="l-od"><i></i>OD</span><span class="l-aviso"><i></i>Aviso</span><span class="l-crit"><i></i>Crítico</span></span></header>
+              <div data-grafica="oxigeno_disuelto"></div></div>
+            <div class="graficas-secundarias">
+              <div class="grafica"><header>
+                  <h3><span class="punto" style="background:var(--s-temp)"></span>Temperatura (°C)</h3>
+                  <span class="actual" id="a-temp"></span></header>
+                <div data-grafica="temperatura"></div></div>
+              <div class="grafica"><header>
+                  <h3><span class="punto" style="background:var(--s-sat)"></span>Saturación (%)</h3>
+                  <span class="actual" id="a-sat"></span></header>
+                <div data-grafica="saturacion"></div></div>
+            </div>
+            <p class="nota" id="meta">Cargando…</p>
+          </div>
+          <div class="grafica">
+            <header><h3>Ubicación de la sonda</h3><a href="#/mapa" class="boton">Ver mapa completo ↗</a></header>
+            <div id="mapa-mini" class="mapa"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="dos">
+        <div class="caja">
+          <header><h2>Resumen de todas las piscinas</h2><a href="#/piscinas" class="boton">Ver todas las piscinas →</a></header>
+          <div class="tabla-scroll"><table>
+            <thead><tr><th>Piscina</th><th>OD (mg/L)</th><th>T° (°C)</th><th>Sat (%)</th><th>Tendencia (1 h)</th><th>Estado</th><th>Última lectura</th></tr></thead>
+            <tbody id="tabla-piscinas"></tbody></table></div>
+        </div>
+        <div class="caja">
+          <header><h2>Alarmas recientes</h2><a href="#/alarmas" class="boton">Ver historial completo →</a></header>
+          <div class="tabla-scroll"><table>
+            <thead><tr><th>Fecha y hora</th><th>Piscina</th><th>Tipo</th><th>Valor</th><th>Estado</th></tr></thead>
+            <tbody id="tabla-alarmas-inicio"></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== PISCINAS ===================== -->
+    <section data-pagina="piscinas" hidden>
+      <p class="nota" id="resumen-finca-2"></p>
+      <div class="rejilla" id="rejilla-2"></div>
+      <div class="caja">
+        <header><h2>Tabla de piscinas</h2></header>
+        <div class="tabla-scroll"><table>
+          <thead><tr><th>Piscina</th><th>OD (mg/L)</th><th>T° (°C)</th><th>Sat (%)</th><th>Tendencia (1 h)</th><th>Margen</th><th>Estado</th><th>Última lectura</th></tr></thead>
+          <tbody id="tabla-piscinas-2"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- ===================== MAPA ===================== -->
+    <section data-pagina="mapa" hidden>
+      <div class="caja">
+        <header><h2>Ubicación de los módulos</h2>
+          <span style="display:flex;gap:.4rem;flex-wrap:wrap">
+            <button id="btn-gps" class="boton" title="Usa el GPS de este dispositivo: párate junto al módulo y púlsalo">📡 Mi ubicación</button>
+            <button id="btn-ubicar" class="boton" title="Haz clic aquí y luego en el mapa para fijar dónde está el módulo">📍 Ubicar en el mapa</button>
+          </span></header>
+        <div class="formulario" id="form-ubicar" hidden style="margin-bottom:.7rem">
+          <div class="fila">
+            <label>Módulo a ubicar<select id="ubicar-nombre"></select></label>
+            <label>Descripción<input id="ubicar-descripcion" placeholder="p. ej. Piscina 2, sector norte"></label>
+            <button class="boton" id="btn-cancelar-ubicar" type="button">Cancelar</button>
+          </div>
+          <p class="nota" id="mapa-nota"></p>
+        </div>
+        <div id="mapa" class="mapa"></div>
+        <p class="nota" id="mapa-nota-2"></p>
+      </div>
+    </section>
+
+    <!-- ===================== ALARMAS ===================== -->
+    <section data-pagina="alarmas" hidden>
+      <div id="alarmas-2" class="alarmas-activas" hidden></div>
+      <div class="caja">
+        <header><h2>Historial de alarmas</h2></header>
+        <div class="tabla-scroll"><table>
+          <thead><tr><th>Inició</th><th>Piscina</th><th>Tipo</th><th>Valor</th><th>Resuelta</th><th>Duración</th><th>Estado</th></tr></thead>
+          <tbody id="tabla-alarmas"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- ===================== HISTORIAL ===================== -->
+    <section data-pagina="historial" hidden>
+      <div class="caja">
+        <header><h2>Lecturas recientes</h2>
+          <span style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+            <select id="hist-piscina" class="boton"></select>
+            <a id="btn-csv" href="/api/export.csv" download class="boton">⬇ Descargar CSV (30 días)</a>
+          </span></header>
+        <div class="tabla-scroll"><table>
+          <thead><tr><th>Hora</th><th>Piscina</th><th>OD (mg/L)</th><th>Temp (°C)</th><th>Sat (%)</th><th></th></tr></thead>
+          <tbody id="tabla"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- ===================== REPORTES ===================== -->
+    <section data-pagina="reportes" hidden>
+      <div class="caja">
+        <header><h2>Resumen diario</h2>
+          <span style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
+            <select id="rep-piscina" class="boton"></select>
+            <div class="pestanas" id="rep-dias"><button data-dias="7" class="activo">7 días</button><button data-dias="30">30 días</button></div>
+            <a id="btn-csv-2" href="/api/export.csv" download class="boton">⬇ CSV</a>
+          </span></header>
+        <div class="tabla-scroll"><table>
+          <thead><tr><th>Día</th><th>Piscina</th><th>Lecturas</th><th>OD mín</th><th>OD máx</th><th>OD prom</th><th>T° mín</th><th>T° máx</th></tr></thead>
+          <tbody id="resumen"></tbody></table></div>
+      </div>
+    </section>
+
+    <!-- ===================== DISPOSITIVOS ===================== -->
+    <section data-pagina="dispositivos" hidden>
+      <div class="caja">
+        <header><h2>Sondas registradas</h2></header>
+        <div class="tabla-scroll"><table>
+          <thead><tr><th>Nombre (deviceName)</th><th>Descripción</th><th>Ubicación</th><th>Última lectura</th><th>Acciones</th></tr></thead>
+          <tbody id="tabla-dispositivos"></tbody></table></div>
+      </div>
+      <div class="caja">
+        <header><h2>Registrar una sonda nueva</h2></header>
+        <form class="formulario" id="form-registrar">
+          <div class="fila">
+            <label>Nombre (SONDA_NOMBRE del agente)<input id="reg-nombre" required placeholder="piscina-2" pattern="[A-Za-z0-9_.-]+"></label>
+            <label>Descripción<input id="reg-descripcion" placeholder="Piscina 2, sector norte"></label>
+            <button class="boton primario" id="btn-registrar" type="submit">➕ Registrar</button>
+          </div>
+          <p class="nota">Debe ser exactamente el mismo nombre con el que reportará su agente (deviceName).</p>
+          <p class="mensaje" id="reg-mensaje"></p>
+        </form>
+      </div>
+    </section>
+
+    <!-- ===================== CONFIGURACIÓN ===================== -->
+    <section data-pagina="configuracion" hidden>
+      <div class="caja">
+        <header><h2>Umbrales de oxígeno por piscina</h2></header>
+        <form class="formulario" id="form-umbrales">
+          <div class="fila">
+            <label>Piscina<select id="umb-piscina"></select></label>
+            <label>Aviso (mg/L)<input id="umb-aviso" type="number" step="0.1" min="0" max="20" required></label>
+            <label>Crítico (mg/L)<input id="umb-critico" type="number" step="0.1" min="0" max="20" required></label>
+            <button class="boton primario" id="btn-umbrales" type="submit">Guardar</button>
+          </div>
+          <p class="nota">Aviso avisa por Telegram; crítico repite cada 30 min mientras siga bajo.</p>
+          <p class="mensaje" id="umb-mensaje"></p>
+        </form>
+      </div>
+      <div class="caja">
+        <header><h2>Clave de la app</h2></header>
+        <form class="formulario" id="form-token">
+          <div class="fila">
+            <label>AUTH_TOKEN del servidor<input id="cfg-token" type="password" autocomplete="off" placeholder="se guarda solo en este navegador"></label>
+            <button class="boton" type="submit">Guardar en este navegador</button>
+          </div>
+          <p class="nota">Hace falta para registrar sondas, ubicarlas y cambiar umbrales.</p>
+          <p class="mensaje" id="token-mensaje"></p>
+        </form>
+      </div>
+      <div class="caja">
+        <header><h2>Apariencia</h2></header>
+        <label class="tema"><input type="checkbox" id="tema-oscuro-2"> Modo oscuro (por defecto sigue al sistema)</label>
+      </div>
+    </section>
+
+    <div id="tooltip" hidden></div>
+    <noscript><p class="vacio">Esta página necesita JavaScript; usa <a href="/api/latest">/api/latest</a>.</p></noscript>
+    <footer class="pie-pagina">
+      <span>Sistema de monitoreo de oxígeno disuelto</span>
+      <a href="/api/latest">última</a><a href="/api/readings">histórico</a><a href="/docs">API</a>
+    </footer>
+  </main>
+</div>
+<!-- JS -->
+</body></html>
