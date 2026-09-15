@@ -61,7 +61,9 @@ h1, h2, h3, p { margin:0; }
           color:var(--lat-tinta); text-decoration:none; font-weight:500; }
 .menu a:hover { background:var(--lat-hover); }
 .menu a.activo { background:var(--lat-activo); color:#fff; box-shadow:inset 3px 0 0 var(--lat-acento); }
-.menu .ico { width:1.25rem; text-align:center; opacity:.85; }
+.menu .ico { width:1.25rem; height:1.25rem; display:inline-flex; align-items:center; justify-content:center; opacity:.8; }
+.menu .ico svg, .campana svg { width:1.2rem; height:1.2rem; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.menu a.activo .ico { opacity:1; }
 .conteo { margin-left:auto; background:var(--z-crit); color:#fff; font-size:.7rem; font-weight:600;
           border-radius:1rem; padding:.05rem .45rem; min-width:1.3rem; text-align:center; }
 .lateral-pie { margin-top:auto; display:flex; flex-direction:column; gap:.6rem; font-size:.8rem; }
@@ -90,7 +92,7 @@ h1, h2, h3, p { margin:0; }
 .cab-derecha { display:flex; align-items:center; gap:.9rem; }
 .reloj { font-variant-numeric:tabular-nums; color:var(--lat-tinta2); font-size:.85rem; text-align:right; }
 .reloj b { display:block; color:#fff; font-size:1.05rem; }
-.campana { position:relative; text-decoration:none; font-size:1.15rem; padding:.3rem .45rem;
+.campana { position:relative; text-decoration:none; display:inline-flex; padding:.4rem .5rem; color:var(--lat-tinta);
            border:1px solid rgba(255,255,255,.2); border-radius:.5rem; background:rgba(0,31,60,.6); }
 .campana .conteo { position:absolute; top:-.4rem; right:-.4rem; }
 
