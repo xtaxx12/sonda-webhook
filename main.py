@@ -43,6 +43,7 @@ import modbus
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 import hmac
 
 # --- Configuración -----------------------------------------------------------
@@ -500,6 +501,11 @@ def render_panel() -> str:
     html = html.replace("<!-- CSS -->", "<style>\n" + _leer_static("app.css") + "\n</style>")
     html = html.replace("<!-- JS -->", "<script>\n" + _leer_static("app.js") + "\n</script>")
     return html
+
+
+# Imágenes de marca (logo y fondo). Van como archivos aparte, cacheables:
+# incrustarlas en la página la haría pesar megas en cada carga.
+app.mount("/static/assets", StaticFiles(directory=os.path.join(STATIC_DIR, "assets")), name="assets")
 
 
 def render_login() -> str:

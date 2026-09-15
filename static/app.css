@@ -12,6 +12,9 @@
   --s-od:#2a78d6; --s-temp:#eb6834; --s-sat:#1baf7a;
   --sombra:0 1px 2px rgba(0,0,0,.05);
   --radio:.7rem;
+  /* Barra lateral: siempre oscura sobre la foto de la finca, en ambos temas. */
+  --lat-fondo:#001f3c; --lat-tinta:#eef2f6; --lat-tinta2:#a9b7c6; --lat-acento:#5aa2f0;
+  --lat-activo:rgba(90,162,240,.22); --lat-hover:rgba(255,255,255,.07);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -45,38 +48,50 @@ h1, h2, h3, p { margin:0; }
 
 /* --- Estructura ---------------------------------------------------------- */
 .app { display:grid; grid-template-columns:15rem minmax(0,1fr); min-height:100vh; }
-.lateral { background:var(--panel); border-right:1px solid var(--borde);
-           display:flex; flex-direction:column; padding:1rem .8rem;
-           position:sticky; top:0; height:100vh; }
-.marca { display:flex; align-items:center; gap:.6rem; padding:.2rem .5rem 1rem; }
-.marca .logo { font-size:1.6rem; line-height:1; }
-.marca b { display:block; font-size:1rem; }
-.marca small { color:var(--tinta2); font-size:.75rem; }
+.lateral { color:var(--lat-tinta); border-right:1px solid rgba(255,255,255,.08);
+           background:linear-gradient(180deg, var(--lat-fondo) 0%, rgba(0,31,60,.92) 38%, rgba(0,31,60,.45) 70%, rgba(0,31,60,.35) 100%),
+                      url(/static/assets/lateral.jpg) 62% bottom / cover no-repeat;
+           display:flex; flex-direction:column; gap:.5rem; padding:1rem .8rem;
+           position:sticky; top:0; height:100vh; overflow-y:auto; }
+.marca { display:flex; flex-direction:column; align-items:center; gap:.1rem; padding:.2rem .5rem 1rem; text-align:center; }
+.logo-marca { width:9.5rem; max-width:100%; display:block; border-radius:.4rem; }
+.marca small { color:var(--lat-tinta2); font-size:.75rem; letter-spacing:.04em; text-transform:uppercase; }
 .menu { display:flex; flex-direction:column; gap:.15rem; }
 .menu a { display:flex; align-items:center; gap:.65rem; padding:.55rem .7rem; border-radius:.5rem;
-          color:var(--tinta); text-decoration:none; font-weight:500; }
-.menu a:hover { background:var(--panel2); }
-.menu a.activo { background:var(--acento-bg); color:var(--acento); }
+          color:var(--lat-tinta); text-decoration:none; font-weight:500; }
+.menu a:hover { background:var(--lat-hover); }
+.menu a.activo { background:var(--lat-activo); color:#fff; box-shadow:inset 3px 0 0 var(--lat-acento); }
 .menu .ico { width:1.25rem; text-align:center; opacity:.85; }
 .conteo { margin-left:auto; background:var(--z-crit); color:#fff; font-size:.7rem; font-weight:600;
           border-radius:1rem; padding:.05rem .45rem; min-width:1.3rem; text-align:center; }
 .lateral-pie { margin-top:auto; display:flex; flex-direction:column; gap:.6rem; font-size:.8rem; }
-.tarjeta-agente { border:1px solid var(--borde); border-radius:.5rem; padding:.6rem .7rem; }
+.lema { font-size:.78rem; letter-spacing:.05em; text-transform:uppercase; color:var(--lat-tinta); line-height:1.5;
+        padding:0 .3rem .4rem; border-bottom:2px solid; border-image:linear-gradient(90deg,#f26a1b 30%,#5aa2f0 30%) 1; width:fit-content; }
+.tarjeta-agente { border:1px solid rgba(255,255,255,.15); border-radius:.5rem; padding:.6rem .7rem;
+                  background:rgba(0,31,60,.65); backdrop-filter:blur(3px); }
 .tarjeta-agente .salud { font-weight:600; }
-.salud[data-nivel=ok]  { color:var(--z-ok); }
-.salud[data-nivel=mal] { color:var(--aviso); }
+.tarjeta-agente .nota { color:var(--lat-tinta2); }
+.lateral #btn-salir { background:rgba(0,31,60,.65); color:var(--lat-tinta); border-color:rgba(255,255,255,.2); }
+.salud[data-nivel=ok]  { color:#38c496; }
+.salud[data-nivel=mal] { color:#f6bd3c; }
 .tema { display:flex; align-items:center; gap:.5rem; padding:0 .3rem; color:var(--tinta2); cursor:pointer; }
+.lateral .tema { color:var(--lat-tinta2); }
 
 .contenido { padding:1.1rem 1.4rem 2.5rem; min-width:0; }
-.cabecera { display:flex; justify-content:space-between; align-items:flex-start; gap:1rem;
-            flex-wrap:wrap; margin-bottom:1rem; }
+/* Cabecera sobre el banner de la finca: velo oscuro en los extremos, donde
+   van el título y el reloj; el centro deja ver el atardecer. */
+.cabecera { display:flex; justify-content:space-between; align-items:center; gap:1rem;
+            flex-wrap:wrap; margin-bottom:1rem; padding:1rem 1.3rem; min-height:6.5rem;
+            border-radius:var(--radio); color:var(--lat-tinta);
+            background:linear-gradient(90deg, var(--lat-fondo) 0%, rgba(0,31,60,.88) 30%, rgba(0,31,60,.25) 58%, rgba(0,31,60,.85) 100%),
+                       url(/static/assets/cabecera.png) center 60% / cover no-repeat; }
 .cabecera h1 { font-size:1.35rem; font-weight:650; letter-spacing:-.01em; }
-.cabecera .sub { color:var(--tinta2); font-size:.85rem; }
+.cabecera .sub { color:var(--lat-tinta2); font-size:.85rem; }
 .cab-derecha { display:flex; align-items:center; gap:.9rem; }
-.reloj { font-variant-numeric:tabular-nums; color:var(--tinta2); font-size:.85rem; text-align:right; }
-.reloj b { display:block; color:var(--tinta); font-size:1.05rem; }
+.reloj { font-variant-numeric:tabular-nums; color:var(--lat-tinta2); font-size:.85rem; text-align:right; }
+.reloj b { display:block; color:#fff; font-size:1.05rem; }
 .campana { position:relative; text-decoration:none; font-size:1.15rem; padding:.3rem .45rem;
-           border:1px solid var(--borde); border-radius:.5rem; background:var(--panel); }
+           border:1px solid rgba(255,255,255,.2); border-radius:.5rem; background:rgba(0,31,60,.6); }
 .campana .conteo { position:absolute; top:-.4rem; right:-.4rem; }
 
 section[data-pagina] { display:flex; flex-direction:column; gap:1rem; }
@@ -178,7 +193,7 @@ code { background:rgba(128,128,128,.15); padding:.15em .4em; border-radius:.25re
 .piscina[data-zona=sin_datos] .od, .piscina[data-zona=manipulacion] .od { opacity:.5; }
 .piscina svg { display:block; width:7rem; height:2rem; flex:none; }
 .piscina .tend { font-size:.82rem; }
-.piscina .pie { font-size:.75rem; color:var(--tinta2); display:flex; justify-content:space-between; gap:.4rem; }
+.piscina .pie { font-size:.75rem; color:var(--tinta2); display:flex; justify-content:space-between; gap:.2rem .6rem; flex-wrap:wrap; }
 
 /* --- Detalle de una piscina ---------------------------------------------- */
 .detalle-cab { display:flex; justify-content:space-between; align-items:center; gap:.8rem; flex-wrap:wrap; }
@@ -277,11 +292,14 @@ code { background:rgba(128,128,128,.15); padding:.15em .4em; border-radius:.25re
              gap:.6rem; padding:.5rem .8rem; border-right:0; border-bottom:1px solid var(--borde); overflow-x:auto; }
   .marca { padding:0; flex:none; }
   .marca small { display:none; }
+  .logo-marca { width:5.5rem; }
+  .lateral { gap:.4rem; overflow-y:hidden; }
   .menu { flex-direction:row; gap:.1rem; }
   .menu a { padding:.4rem .55rem; font-size:.82rem; white-space:nowrap; }
   .menu .ico { display:none; }
   .lateral-pie { display:none; }
   .contenido { padding:.9rem 1rem 2rem; }
+  .cabecera { min-height:0; padding:.7rem .9rem; }
   .cabecera h1 { font-size:1.15rem; }
   .cabecera .sub { display:none; }
   .franja .datos { margin-left:0; }

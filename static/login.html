@@ -7,17 +7,20 @@
 </script>
 <!-- CSS -->
 <style>
-  .acceso { min-height:100vh; display:grid; place-items:center; padding:1.5rem; }
-  .acceso .caja { width:100%; max-width:22rem; display:grid; gap:1rem; padding:1.6rem 1.5rem; }
+  .acceso { min-height:100vh; display:grid; place-items:center; padding:1.5rem;
+            background:linear-gradient(rgba(0,31,60,.55), rgba(0,31,60,.75)), url(/static/assets/lateral.jpg) center/cover no-repeat; }
+  .acceso .caja { width:100%; max-width:22rem; display:grid; gap:1rem; padding:1.6rem 1.5rem;
+                  background:var(--lat-fondo); color:var(--lat-tinta); border-color:rgba(255,255,255,.12); }
   .acceso .marca { padding:0; }
+  .acceso .marca small, .acceso label { color:var(--lat-tinta2); }
   .acceso input[type=password] { width:100%; }
 </style>
 </head>
 <body>
 <div class="acceso">
   <form class="caja formulario" id="form-login">
-    <div class="marca"><span class="logo">🦐</span>
-      <span><b>Camaronera</b><small>Monitoreo de oxígeno</small></span></div>
+    <div class="marca"><img class="logo-marca" src="/static/assets/logo.png" alt="BGR Export">
+      <small>Monitoreo de oxígeno disuelto</small></div>
     <label>Clave de acceso
       <input type="password" id="clave" autocomplete="current-password" autofocus required></label>
     <button class="boton primario" type="submit">Entrar</button>

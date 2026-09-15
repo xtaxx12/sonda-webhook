@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 readings.db
 .venv/
+venv/
+static/assets/image.png
+static/assets/topbar.png

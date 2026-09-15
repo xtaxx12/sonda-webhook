@@ -857,3 +857,18 @@ def test_telegram_prueba_envia_mensaje(cliente, monkeypatch):
 def test_configuracion_tiene_telegram(cliente):
     html = cliente.get("/").text
     assert 'id="btn-telegram"' in html and "/api/telegram" in html
+
+
+# --- Imagen de marca en la barra lateral --------------------------------------
+
+def test_sirve_los_recursos_de_marca(cliente):
+    assert cliente.get("/static/assets/lateral.jpg").status_code == 200
+    assert cliente.get("/static/assets/logo.png").status_code == 200
+    html = cliente.get("/").text
+    assert "/static/assets/logo.png" in html
+    assert "/static/assets/lateral.jpg" in html
+
+
+def test_los_recursos_no_exigen_sesion(protegido):
+    # La pantalla de acceso también lleva la imagen de fondo.
+    assert protegido.get("/static/assets/lateral.jpg").status_code == 200
