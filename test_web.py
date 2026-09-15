@@ -762,3 +762,69 @@ def test_historial_tiene_rangos_largos_y_personalizado(cliente):
     assert "/api/serie" in html
     assert 'data-hist="24"' in html and 'data-hist="168"' in html   # 24 h y 7 días
     assert 'id="hist-desde"' in html and 'id="hist-hasta"' in html  # personalizado
+
+
+# --- Acceso con clave (PANEL_CLAVE) -------------------------------------------
+
+@pytest.fixture()
+def protegido(tmp_path, monkeypatch):
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setenv("AUTH_TOKEN", "prueba")
+    monkeypatch.setenv("PANEL_CLAVE", "secreta123")
+    monkeypatch.delenv("MODBUS_TCP_PORT", raising=False)
+    import main
+    importlib.reload(main)
+    with TestClient(main.app) as c:
+        yield c
+
+
+def test_sin_clave_el_panel_es_abierto(cliente):
+    assert 'data-pagina="inicio"' in cliente.get("/").text
+    assert cliente.get("/api/estados").status_code == 200
+    assert cliente.get("/api/sesion").json() == {"protegido": False, "activa": False}
+
+
+def test_con_clave_el_panel_pide_login(protegido):
+    html = protegido.get("/").text
+    assert 'id="form-login"' in html
+    assert 'data-pagina="inicio"' not in html
+    assert protegido.get("/api/estados").status_code == 401
+    assert protegido.get("/api/sesion").json() == {"protegido": True, "activa": False}
+
+
+def test_login_incorrecto_y_correcto(protegido):
+    r = protegido.post("/login", json={"clave": "mala"})
+    assert r.status_code == 401
+    assert "sesion" not in r.cookies
+    r = protegido.post("/login", json={"clave": "secreta123"})
+    assert r.status_code == 200
+    assert "sesion" in r.cookies
+    # Con la cookie, panel y API abiertos.
+    assert 'data-pagina="inicio"' in protegido.get("/").text
+    assert protegido.get("/api/estados").status_code == 200
+    assert protegido.get("/api/sesion").json() == {"protegido": True, "activa": True}
+
+
+def test_la_sesion_autoriza_escrituras_sin_token(protegido):
+    protegido.post("/login", json={"clave": "secreta123"})
+    r = protegido.put("/api/umbrales/piscina-1", json={"od_aviso": 5.0, "od_critico": 3.5})
+    assert r.status_code == 200
+    r = protegido.put("/api/dispositivos/piscina-1", json={"descripcion": "x"})
+    assert r.status_code == 200
+
+
+def test_cookie_falsificada_no_vale(protegido):
+    protegido.cookies.set("sesion", "9999999999.abcdef")
+    assert protegido.get("/api/estados").status_code == 401
+
+
+def test_logout_cierra_la_sesion(protegido):
+    protegido.post("/login", json={"clave": "secreta123"})
+    assert protegido.post("/logout").status_code == 200
+    assert protegido.get("/api/estados").status_code == 401
+
+
+def test_webhook_y_health_siguen_abiertos_con_clave(protegido):
+    assert protegido.get("/health").status_code == 200
+    r = protegido.post("/usr/webhook?token=prueba", json={"deviceName": "p1", "Temperature": 26.0})
+    assert r.status_code == 200

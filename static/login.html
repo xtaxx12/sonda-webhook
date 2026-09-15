@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Camaronera · Acceso</title>
+<script>
+  try { const t = localStorage.getItem("tema"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<!-- CSS -->
+<style>
+  .acceso { min-height:100vh; display:grid; place-items:center; padding:1.5rem; }
+  .acceso .caja { width:100%; max-width:22rem; display:grid; gap:1rem; padding:1.6rem 1.5rem; }
+  .acceso .marca { padding:0; }
+  .acceso input[type=password] { width:100%; }
+</style>
+</head>
+<body>
+<div class="acceso">
+  <form class="caja formulario" id="form-login">
+    <div class="marca"><span class="logo">🦐</span>
+      <span><b>Camaronera</b><small>Monitoreo de oxígeno</small></span></div>
+    <label>Clave de acceso
+      <input type="password" id="clave" autocomplete="current-password" autofocus required></label>
+    <button class="boton primario" type="submit">Entrar</button>
+    <p class="mensaje error" id="login-mensaje"></p>
+  </form>
+</div>
+<script>
+  document.getElementById("form-login").addEventListener("submit", async ev => {
+    ev.preventDefault();
+    const msg = document.getElementById("login-mensaje");
+    msg.textContent = "";
+    const r = await fetch("/login", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clave: document.getElementById("clave").value }) });
+    if (r.ok) { location.reload(); return; }
+    msg.textContent = r.status === 401 ? "Clave incorrecta." : "No se pudo entrar. Intenta de nuevo.";
+  });
+</script>
+</body></html>

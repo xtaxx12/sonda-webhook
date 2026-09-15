@@ -37,15 +37,21 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
+import acceso
 import alertas
 import modbus
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+import hmac
 
 # --- Configuración -----------------------------------------------------------
 
 AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "").strip()
+# Clave del panel. Si está definida, ver el panel y la API exige iniciar
+# sesión; el webhook sigue con su token y /health queda abierto.
+PANEL_CLAVE = os.environ.get("PANEL_CLAVE", "").strip()
+_SECRETO_SESION = acceso.secreto_de(PANEL_CLAVE, AUTH_TOKEN)
 
 def _default_db_path() -> str:
     if os.path.isdir("/data"):
@@ -275,6 +281,66 @@ async def _arrancar_modbus() -> None:
     asyncio.ensure_future(server.serve_forever())
 
 
+# --- Acceso ------------------------------------------------------------------
+
+def _sesion_activa(request: Request) -> bool:
+    if not PANEL_CLAVE:
+        return False
+    return acceso.validar(request.cookies.get("sesion", ""), _SECRETO_SESION)
+
+
+def _exigir_escritura(request: Request, token: str) -> None:
+    """Registrar sondas, ubicarlas o cambiar umbrales: sesión iniciada o token."""
+    if _sesion_activa(request):
+        return
+    if AUTH_TOKEN:
+        entregado = token or request.headers.get("X-Auth-Token", "")
+        if not hmac.compare_digest(entregado, AUTH_TOKEN):
+            raise HTTPException(status_code=401, detail="token inválido")
+
+
+@app.middleware("http")
+async def _exigir_sesion(request: Request, call_next):
+    ruta = request.url.path
+    if PANEL_CLAVE and not _sesion_activa(request):
+        if ruta == "/":
+            return HTMLResponse(render_login())
+        if (ruta.startswith("/api/") and ruta != "/api/sesion") or ruta in ("/docs", "/openapi.json"):
+            return JSONResponse({"detail": "sesión requerida"}, status_code=401)
+    return await call_next(request)
+
+
+def _cookie_segura(request: Request) -> bool:
+    return request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+
+
+@app.post("/login")
+async def login(request: Request):
+    if not PANEL_CLAVE:
+        return {"ok": True, "protegido": False}
+    cuerpo = await request.json()
+    clave = str(cuerpo.get("clave", ""))
+    if not hmac.compare_digest(clave, PANEL_CLAVE):
+        await asyncio.sleep(1)     # frena la fuerza bruta sin estado extra
+        raise HTTPException(status_code=401, detail="clave incorrecta")
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie("sesion", acceso.emitir(_SECRETO_SESION), max_age=acceso.DIAS_SESION * 86400,
+                    httponly=True, samesite="lax", secure=_cookie_segura(request))
+    return resp
+
+
+@app.post("/logout")
+def logout():
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("sesion")
+    return resp
+
+
+@app.get("/api/sesion")
+def api_sesion(request: Request):
+    return {"protegido": bool(PANEL_CLAVE), "activa": _sesion_activa(request)}
+
+
 # --- Endpoints ---------------------------------------------------------------
 
 @app.on_event("startup")
@@ -415,6 +481,11 @@ def render_panel() -> str:
     return html
 
 
+def render_login() -> str:
+    html = _leer_static("login.html")
+    return html.replace("<!-- CSS -->", "<style>\n" + _leer_static("app.css") + "\n</style>")
+
+
 @app.get("/api/dispositivos")
 def listar_dispositivos():
     """Módulos conocidos: los ubicados en el mapa y los vistos en lecturas."""
@@ -450,10 +521,7 @@ def listar_dispositivos():
 @app.put("/api/dispositivos/{nombre}")
 async def ubicar_dispositivo(nombre: str, request: Request, token: str = Query(default="")):
     """Fija la ubicación (y descripción) de un módulo en el mapa. Exige el token."""
-    if AUTH_TOKEN:
-        entregado = token or request.headers.get("X-Auth-Token", "")
-        if entregado != AUTH_TOKEN:
-            raise HTTPException(status_code=401, detail="token inválido")
+    _exigir_escritura(request, token)
 
     cuerpo = await request.json()
     lat, lng = cuerpo.get("lat"), cuerpo.get("lng")
@@ -956,10 +1024,7 @@ def api_umbrales(nombre: str):
 
 @app.put("/api/umbrales/{nombre}")
 async def fijar_umbrales(nombre: str, request: Request, token: str = Query(default="")):
-    if AUTH_TOKEN:
-        entregado = token or request.headers.get("X-Auth-Token", "")
-        if entregado != AUTH_TOKEN:
-            raise HTTPException(status_code=401, detail="token inválido")
+    _exigir_escritura(request, token)
     cuerpo = await request.json()
     try:
         od_aviso = float(cuerpo["od_aviso"])
@@ -976,10 +1041,7 @@ async def fijar_umbrales(nombre: str, request: Request, token: str = Query(defau
 @app.delete("/api/dispositivos/{nombre}")
 def quitar_dispositivo(nombre: str, request: Request, token: str = Query(default="")):
     """Quita la ubicación de un módulo del mapa. Sus lecturas no se tocan."""
-    if AUTH_TOKEN:
-        entregado = token or request.headers.get("X-Auth-Token", "")
-        if entregado != AUTH_TOKEN:
-            raise HTTPException(status_code=401, detail="token inválido")
+    _exigir_escritura(request, token)
     with _lock, db() as con:
         con.execute("DELETE FROM dispositivos WHERE nombre = ?", (nombre,))
     return {"ok": True, "nombre": nombre}

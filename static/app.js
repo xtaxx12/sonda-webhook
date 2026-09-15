@@ -81,13 +81,30 @@ function nombreDe(d) {
   const r = dispositivos.find(x => x.nombre === d); return (r && r.descripcion) || d;
 }
 
-// --- Token de la app (para escribir) ----------------------------------------
+// --- Sesión y token de la app (para escribir) --------------------------------
+let sesion = { protegido: false, activa: false };
+async function cargarSesion() {
+  try { sesion = await (await fetch("/api/sesion")).json(); } catch (e) { return; }
+  $("btn-salir").hidden = !sesion.activa;
+  $("caja-token").hidden = sesion.activa;   // con sesión, las escrituras ya van autorizadas
+}
+$("btn-salir").addEventListener("click", async () => { await fetch("/logout", { method: "POST" }); location.reload(); });
+function sesionCaducada(r) {
+  // Con clave, un 401 en lectura significa que la sesión expiró: a la pantalla de acceso.
+  if (r.status === 401 && sesion.protegido) { location.reload(); return true; }
+  return false;
+}
 function tokenApp() { try { return localStorage.getItem("token_panel") || ""; } catch (e) { return ""; } }
 async function fetchAuth(url, opciones = {}) {
   const token = tokenApp();
-  if (!token) { irA("configuracion"); mensaje("token-mensaje", "Primero guarda la clave de la app.", "error"); throw new Error("sin token"); }
-  const r = await fetch(url, { ...opciones, headers: { "Content-Type": "application/json", "X-Auth-Token": token, ...(opciones.headers || {}) } });
-  if (r.status === 401) { irA("configuracion"); mensaje("token-mensaje", "Clave inválida: revísala.", "error"); throw new Error("token inválido"); }
+  if (!token && !sesion.activa) { irA("configuracion"); mensaje("token-mensaje", "Primero guarda la clave de la app.", "error"); throw new Error("sin token"); }
+  const cab = { "Content-Type": "application/json", ...(opciones.headers || {}) };
+  if (token) cab["X-Auth-Token"] = token;
+  const r = await fetch(url, { ...opciones, headers: cab });
+  if (r.status === 401) {
+    if (sesionCaducada(r)) throw new Error("sesión caducada");
+    irA("configuracion"); mensaje("token-mensaje", "Clave inválida: revísala.", "error"); throw new Error("token inválido");
+  }
   return r;
 }
 function mensaje(id, texto, clase) {
@@ -241,7 +258,7 @@ function rellenarSelector(sel, incluirTodas) {
 
 async function cargarFinca() {
   let j;
-  try { j = await (await fetch("/api/estados")).json(); } catch (e) { return; }
+  try { const r = await fetch("/api/estados"); if (sesionCaducada(r)) return; j = await r.json(); } catch (e) { return; }
   listaFinca = j.piscinas || [];
   finca = Object.fromEntries(listaFinca.map(p => [p.dispositivo, p]));
   ultimaFinca = new Date();
@@ -867,6 +884,7 @@ $("form-token").addEventListener("submit", ev => {
 // --- Arranque ----------------------------------------------------------------
 iniciarMapas();
 mostrarPagina();
+cargarSesion();
 cargarFinca().then(() => { cargarDispositivos(); cargarEstado().then(cargar); cargarAlarmas(); });
 setInterval(() => {
   cargarFinca().then(cargarDispositivos);   // el mapa necesita las zonas ya cargadas

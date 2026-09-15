@@ -34,6 +34,7 @@
         <div id="salud" class="salud">○ Conectando…</div>
         <div class="nota" id="salud-nota">Agente de la finca</div>
       </div>
+      <button class="boton" id="btn-salir" hidden>Cerrar sesión</button>
     </div>
   </aside>
 
@@ -271,14 +272,14 @@
           <p class="mensaje" id="umb-mensaje"></p>
         </form>
       </div>
-      <div class="caja">
+      <div class="caja" id="caja-token">
         <header><h2>Clave de la app</h2></header>
         <form class="formulario" id="form-token">
           <div class="fila">
             <label>AUTH_TOKEN del servidor<input id="cfg-token" type="password" autocomplete="off" placeholder="se guarda solo en este navegador"></label>
             <button class="boton" type="submit">Guardar en este navegador</button>
           </div>
-          <p class="nota">Hace falta para registrar sondas, ubicarlas y cambiar umbrales.</p>
+          <p class="nota">Hace falta para registrar sondas, ubicarlas y cambiar umbrales. Si el panel tiene clave de acceso (PANEL_CLAVE), no se necesita.</p>
           <p class="mensaje" id="token-mensaje"></p>
         </form>
       </div>
