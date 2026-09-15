@@ -123,7 +123,7 @@ function mostrarPagina() {
   window.scrollTo({ top: 0 });
   if (p === "inicio") { if (datos.length) render(); if (mapaMini) setTimeout(() => mapaMini.invalidateSize(), 50); }
   if (p === "mapa" && mapa) setTimeout(() => { mapa.invalidateSize(); ajustarMapa(mapa); }, 50);
-  if (p === "historial") cargar();
+  if (p === "historial") { cargarHistorial(); cargarTablaHistorial(); }
   if (p === "reportes") cargarResumen();
   if (p === "configuracion") { $("cfg-token").value = tokenApp(); rellenarUmbrales(); }
 }
@@ -331,7 +331,6 @@ async function cargar() {
   } catch (e) {
     $("meta").innerHTML = '<span class="alerta">⚠ No se pudo consultar la API. ¿El servidor está corriendo?</span>';
   }
-  cargarTablaHistorial();
 }
 
 function render() {
@@ -350,7 +349,7 @@ function render() {
   for (const s of SERIES) dibujar(s);
 }
 
-function escala(puntos, campo, h, padT, padB, incluir) {
+function escala(puntos, campo, h, padT, padB, incluir, noNegativo) {
   const vals = puntos.map(p => p[campo]).filter(v => v !== null && v !== undefined);
   let vmin = Math.min(...vals), vmax = Math.max(...vals);
   const minReal = vmin;
@@ -361,26 +360,38 @@ function escala(puntos, campo, h, padT, padB, incluir) {
   for (const v of (incluir || [])) {
     if (v !== null && v !== undefined && v < minReal && minReal - v <= 2) vmin = Math.min(vmin, v - 0.15);
   }
+  // Oxígeno y saturación no son negativos: un eje que baja de cero confunde.
+  if (noNegativo && minReal >= 0) vmin = Math.max(vmin, 0);
   return { vmin, vmax, y: v => padT + (1 - (v - vmin) / (vmax - vmin)) * (h - padT - padB) };
 }
 
 function dibujar(serie) {
   const cont = document.querySelector(`[data-grafica="${serie.campo}"]`);
   if (!cont) return;
-  const puntos = datos.filter(p => p[serie.campo] !== null && p[serie.campo] !== undefined);
-  if (puntos.length < 2) { cont.innerHTML = '<p class="vacio">Aún no hay suficientes lecturas para la gráfica.</p>'; return; }
+  const puntos = datos.filter(p => p[serie.campo] !== null && p[serie.campo] !== undefined)
+    .map(p => ({ t: p.t, v: p[serie.campo], manip: !!p.manipulacion }));
+  const t1 = Date.now();
+  dibujarGrafica(cont, serie, puntos, t1 - rangoHoras * 3600e3, t1, { alto: serie.campo === "oxigeno_disuelto" ? 230 : 150 });
+}
+
+// Gráfica genérica: puntos {t: Date, v, min?, max?, manip?}. Con min/max pinta
+// la banda mín–máx del cubo (rangos largos); sin ellos, solo la línea.
+function dibujarGrafica(cont, serie, puntos, t0, t1, op = {}) {
+  if (puntos.length < 2) { cont.innerHTML = '<p class="vacio">Aún no hay suficientes lecturas para la gráfica.</p>'; cont._puntos = null; return; }
   const esOD = serie.campo === "oxigeno_disuelto";
-  const w = Math.max(cont.clientWidth || 560, 280), h = esOD ? 230 : 150;
+  const w = Math.max(cont.clientWidth || 560, 280), h = op.alto || 150;
   const padL = 46, padR = 12, padT = 8, padB = 18;
-  const t0 = Date.now() - rangoHoras * 3600e3, t1 = Date.now();
+  const horas = (t1 - t0) / 3600e3;
   const x = t => padL + (t - t0) / (t1 - t0) * (w - padL - padR);
   const forzar = esOD && umbrales ? [umbrales.od_aviso, umbrales.od_critico] : null;
-  const { vmin, vmax, y } = escala(puntos, serie.campo, h, padT, padB, forzar);
+  const conBanda = puntos.some(p => p.min !== null && p.min !== undefined);
+  const paraEscala = conBanda ? puntos.flatMap(p => [{ v: p.v }, { v: p.min }, { v: p.max }]) : puntos;
+  const { vmin, vmax, y } = escala(paraEscala, "v", h, padT, padB, forzar, serie.campo !== "temperatura");
 
-  let svg = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${serie.nombre}, últimas ${rangoHoras} horas">`;
+  let svg = `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="${serie.nombre}">`;
 
   // Franja nocturna (18:00 a 06:00 hora de Ecuador): ahí se desploma el oxígeno.
-  if (rangoHoras >= 6) {
+  if (horas >= 6 && horas <= 24 * 8) {
     const paso = 15 * 60e3;
     let ini = null;
     for (let t = t0; t <= t1 + paso; t += paso) {
@@ -394,14 +405,15 @@ function dibujar(serie) {
       }
     }
   }
-  // Tramos con la sonda fuera del agua (manipulacion): sombreados.
+  // Tramos con la sonda fuera del agua (manipulación): sombreados.
   {
-    let ini = null;
-    for (let i = 0; i <= datos.length; i++) {
-      const m = i < datos.length && datos[i].manipulacion;
-      if (m && ini === null) ini = datos[i].t.getTime();
+    const ancho = op.paso ? op.paso * 1000 : 0;
+    let ini = null, fin = null;
+    for (let i = 0; i <= puntos.length; i++) {
+      const p = puntos[i], m = p && p.manip;
+      if (m && ini === null) ini = p.t.getTime();
+      if (m) fin = p.t.getTime() + ancho;
       if (!m && ini !== null) {
-        const fin = datos[i - 1].t.getTime();
         const x0 = Math.max(padL, x(ini)), x1 = Math.min(w - padR, x(fin));
         if (x1 > x0 + 0.5) {
           svg += `<rect class="banda-manip" x="${x0.toFixed(1)}" y="${padT}" width="${(x1 - x0).toFixed(1)}" height="${h - padT - padB}"/>`;
@@ -429,32 +441,54 @@ function dibujar(serie) {
     svg += `<line class="gridline" x1="${padL}" x2="${w - padR}" y1="${yy}" y2="${yy}"/>`;
     svg += `<text class="ejey" x="${padL - 6}" y="${+yy + 3}" text-anchor="end">${nivel(f).toFixed(serie.dec === 1 ? 0 : 1)}</text>`;
   }
-  for (const f of [0.08, 0.5, 0.92]) {
-    const t = t0 + (t1 - t0) * f;
-    svg += `<text class="ejex" x="${x(t).toFixed(1)}" y="${h - 4}" text-anchor="middle">${fmtHora(new Date(t))}</text>`;
+  const nEtq = horas > 48 ? 5 : 3;
+  for (let i = 0; i < nEtq; i++) {
+    const f = 0.08 + (0.84 * i) / (nEtq - 1);
+    const t = new Date(t0 + (t1 - t0) * f);
+    svg += `<text class="ejex" x="${x(t).toFixed(1)}" y="${h - 4}" text-anchor="middle">${horas > 48 ? fmtFechaHora(t) : fmtHora(t)}</text>`;
   }
   // La línea se corta en los huecos: un corte de dos horas no es agua estable.
   const deltas = puntos.slice(1).map((p, i) => p.t - puntos[i].t).sort((a, b) => a - b);
   const mediana = deltas[Math.floor(deltas.length / 2)] || 15000;
   const corte = Math.max(3 * mediana, 60000);
+  if (conBanda) {
+    // Banda mín–máx por tramo continuo.
+    let tramo = [];
+    const cerrar = () => {
+      if (tramo.length < 2) { tramo = []; return; }
+      const arriba = tramo.map(p => `${x(p.t.getTime()).toFixed(1)},${y(p.max).toFixed(1)}`);
+      const abajo = tramo.slice().reverse().map(p => `${x(p.t.getTime()).toFixed(1)},${y(p.min).toFixed(1)}`);
+      svg += `<polygon class="banda-minmax" fill="${serie.color}" points="${arriba.concat(abajo).join(" ")}"/>`;
+      tramo = [];
+    };
+    let tPrev = null;
+    for (const p of puntos) {
+      const t = p.t.getTime();
+      if (tPrev !== null && t - tPrev > corte) cerrar();
+      if (p.min !== null && p.min !== undefined) tramo.push(p); else cerrar();
+      tPrev = t;
+    }
+    cerrar();
+  }
   let d = "", tPrev = null;
   for (const p of puntos) {
     const t = p.t.getTime();
-    d += `${tPrev === null || t - tPrev > corte ? "M" : "L"}${x(t).toFixed(1)},${y(p[serie.campo]).toFixed(1)}`;
+    d += `${tPrev === null || t - tPrev > corte ? "M" : "L"}${x(t).toFixed(1)},${y(p.v).toFixed(1)}`;
     tPrev = t;
   }
   svg += `<path d="${d}" fill="none" stroke="${serie.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
   const fin = puntos[puntos.length - 1];
-  svg += `<circle cx="${x(fin.t.getTime()).toFixed(1)}" cy="${y(fin[serie.campo]).toFixed(1)}" r="3.5" fill="${serie.color}"/>`;
+  svg += `<circle cx="${x(fin.t.getTime()).toFixed(1)}" cy="${y(fin.v).toFixed(1)}" r="3.5" fill="${serie.color}"/>`;
   svg += `<line class="cruz" y1="${padT}" y2="${h - padB}" x1="-9" x2="-9" data-cruz hidden/>`;
   svg += `<circle r="4" fill="none" stroke="${serie.color}" stroke-width="2" data-foco hidden cx="-9" cy="-9"/>`;
   svg += "</svg>";
   cont.innerHTML = svg;
-  cont._puntos = puntos; cont._x = x; cont._y = y;
+  cont._puntos = puntos; cont._x = x; cont._y = y; cont._serie = serie; cont._largo = horas > 48;
   const svgEl = cont.firstChild;
+  const grupo = cont.dataset.grafica !== undefined ? "[data-grafica]" : "[data-grafica-h]";
   svgEl.addEventListener("mousemove", ev => {
     const caja = svgEl.getBoundingClientRect();
-    mostrarCruz(t0 + (ev.clientX - caja.left) / caja.width * (t1 - t0), ev.clientX, ev.clientY);
+    mostrarCruz(t0 + (ev.clientX - caja.left) / caja.width * (t1 - t0), ev.clientX, ev.clientY, grupo);
   });
   svgEl.addEventListener("mouseleave", ocultarCruz);
 }
@@ -463,19 +497,20 @@ function masCercano(puntos, t) {
   for (const p of puntos) { const d = Math.abs(p.t.getTime() - t); if (d < dist) { dist = d; mejor = p; } }
   return mejor;
 }
-function mostrarCruz(t, cx, cy) {
+function mostrarCruz(t, cx, cy, grupo = "[data-grafica]") {
   const tooltip = $("tooltip");
   let filas = "", hora = "";
-  for (const s of SERIES) {
-    const cont = document.querySelector(`[data-grafica="${s.campo}"]`);
-    if (!cont || !cont._puntos) continue;
+  for (const cont of document.querySelectorAll(grupo)) {
+    if (!cont._puntos) continue;
+    const s = cont._serie;
     const p = masCercano(cont._puntos, t);
-    hora = FMT_HORA_S.format(p.t);
+    hora = cont._largo ? fmtFechaHora(p.t) : FMT_HORA_S.format(p.t);
     const xx = cont._x(p.t.getTime()).toFixed(1);
     const cruz = cont.querySelector("[data-cruz]"), foco = cont.querySelector("[data-foco]");
     cruz.setAttribute("x1", xx); cruz.setAttribute("x2", xx); cruz.hidden = false;
-    foco.setAttribute("cx", xx); foco.setAttribute("cy", cont._y(p[s.campo]).toFixed(1)); foco.hidden = false;
-    filas += `<div class="fila"><span class="punto" style="background:${s.color}"></span>${s.nombre}<b>${p[s.campo].toFixed(s.dec)} ${s.unidad}</b></div>`;
+    foco.setAttribute("cx", xx); foco.setAttribute("cy", cont._y(p.v).toFixed(1)); foco.hidden = false;
+    const rango = p.min !== null && p.min !== undefined ? ` <small>(${p.min.toFixed(s.dec)}–${p.max.toFixed(s.dec)})</small>` : "";
+    filas += `<div class="fila"><span class="punto" style="background:${s.color}"></span>${s.nombre}<b>${p.v.toFixed(s.dec)} ${s.unidad}${rango}</b></div>`;
   }
   tooltip.innerHTML = `<div class="fila"><b>${hora}</b></div>` + filas;
   tooltip.hidden = false;
@@ -494,24 +529,86 @@ $("rangos").addEventListener("click", ev => {
   document.querySelectorAll("#rangos button").forEach(x => x.classList.toggle("activo", x === b));
   cargar();
 });
-addEventListener("resize", () => { if (datos.length && paginaActual === "inicio") render(); });
+addEventListener("resize", () => { if (paginaActual === "inicio" && datos.length) render(); if (paginaActual === "historial") cargarHistorial(); });
 
-// --- Historial: tabla de lecturas + CSV -------------------------------------
+// --- Historial: serie agregada + tabla + CSV ---------------------------------
+let histHoras = 24, histDesde = null, histHasta = null;
+const CAMPO_SERIE = { oxigeno_disuelto: "od", temperatura: "temp", saturacion: "sat" };
+function localAIso(valor) {   // datetime-local (hora Ecuador, sin DST) -> ISO UTC
+  return valor ? new Date(valor + ":00-05:00").toISOString() : "";
+}
+function isoALocal(d) {       // Date -> valor de datetime-local en hora Ecuador
+  const partes = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: ZONA_HORARIA, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
+    .formatToParts(d).map(p => [p.type, p.value]));
+  return `${partes.year}-${partes.month}-${partes.day}T${partes.hour === "24" ? "00" : partes.hour}:${partes.minute}`;
+}
+function rangoHistorial() {
+  if (histHoras) { const t1 = Date.now(); return [t1 - histHoras * 3600e3, t1]; }
+  return [histDesde, histHasta];
+}
+async function cargarHistorial() {
+  const [t0, t1] = rangoHistorial();
+  if (!t0 || !t1 || t1 <= t0) { $("hist-meta").textContent = "Elige un rango válido."; return; }
+  const sel = $("hist-piscina").value;
+  const filtro = sel ? `&dispositivo=${encodeURIComponent(sel)}` : "";
+  let j;
+  try {
+    j = await (await fetch(`/api/serie?desde=${new Date(t0).toISOString()}&hasta=${new Date(t1).toISOString()}${filtro}`)).json();
+  } catch (e) { $("hist-meta").textContent = "No se pudo consultar la API."; return; }
+  if (j.detail) { $("hist-meta").textContent = j.detail; return; }
+  if (sel && finca[sel]) umbrales = finca[sel].umbrales;
+  const n = j.puntos.reduce((a, p) => a + p.n, 0);
+  $("hist-meta").textContent = `${n} lecturas · ${j.puntos.length} cubos de ${j.paso >= 3600 ? (j.paso / 3600).toFixed(1) + " h" : j.paso / 60 + " min"} · ${fmtFechaHora(new Date(t0))} → ${fmtFechaHora(new Date(t1))}`;
+  for (const s of SERIES) {
+    const k = CAMPO_SERIE[s.campo];
+    const puntos = j.puntos.filter(p => p[k] !== null || p.manip > 0).map(p => ({
+      t: new Date(p.t), v: p[k], min: p[k + "_min"], max: p[k + "_max"], manip: p.manip > 0 && p[k] === null,
+    })).filter(p => p.v !== null || p.manip);
+    // Un cubo solo con manipulación no tiene valor: se sombrea, pero no se une a la línea.
+    const conValor = puntos.filter(p => p.v !== null);
+    const cont = document.querySelector(`[data-grafica-h="${s.campo}"]`);
+    dibujarGrafica(cont, s, conValor.length >= 2 ? marcarManip(conValor, puntos) : [], t0, t1, { alto: s.campo === "oxigeno_disuelto" ? 230 : 150, paso: j.paso });
+  }
+  $("btn-csv").href = `/api/export.csv?since=${encodeURIComponent(new Date(t0).toISOString())}&hasta=${encodeURIComponent(new Date(t1).toISOString())}${filtro}`;
+}
+function marcarManip(conValor, todos) {
+  // Inserta los cubos de manipulación (sin valor) como marcas para el sombreado,
+  // copiando el último valor conocido para que la escala no cambie.
+  const salida = [];
+  let ultimo = conValor[0].v;
+  for (const p of todos) {
+    if (p.v !== null) { ultimo = p.v; salida.push(p); }
+    else salida.push({ ...p, v: ultimo, min: null, max: null, manip: true });
+  }
+  return salida;
+}
+$("hist-rangos").addEventListener("click", ev => {
+  const b = ev.target.closest("button[data-hist]"); if (!b) return;
+  histHoras = +b.dataset.hist;
+  document.querySelectorAll("#hist-rangos button").forEach(x => x.classList.toggle("activo", x === b));
+  $("hist-personalizado").hidden = histHoras !== 0;
+  if (!histHoras) {
+    if (!$("hist-desde").value) { $("hist-desde").value = isoALocal(new Date(Date.now() - 2 * 86400e3)); $("hist-hasta").value = isoALocal(new Date()); }
+    $("hist-aplicar").click();
+  } else cargarHistorial();
+});
+$("hist-aplicar").addEventListener("click", () => {
+  histDesde = Date.parse(localAIso($("hist-desde").value)); histHasta = Date.parse(localAIso($("hist-hasta").value));
+  cargarHistorial();
+});
 async function cargarTablaHistorial() {
   const sel = $("hist-piscina").value;
   const filtro = sel ? `&dispositivo=${encodeURIComponent(sel)}` : "";
   let j;
-  try { j = await (await fetch(`/api/readings?limit=100${filtro}`)).json(); } catch (e) { return; }
+  try { j = await (await fetch(`/api/readings?limit=40${filtro}`)).json(); } catch (e) { return; }
   $("tabla").innerHTML = (j.lecturas || []).map(l => {
     const fallo = l.oxigeno_disuelto === null && l.temperatura === null && l.saturacion === null;
     return `<tr><td>${fmtFechaHora(new Date(l.recibido_en))}</td><td>${esc(nombreDe(l.dispositivo))}</td>` +
       `<td>${num(l.oxigeno_disuelto, 2)}</td><td>${num(l.temperatura, 2)}</td><td>${num(l.saturacion, 1)}</td>` +
       `<td>${fallo ? '<span class="pill gris">sin respuesta</span>' : l.manipulacion ? '<span class="pill" data-zona="manipulacion">manipulación</span>' : ""}</td></tr>`;
   }).join("") || '<tr><td colspan="6" class="vacio">Sin lecturas todavía.</td></tr>';
-  const desde = new Date(Date.now() - 30 * 86400e3).toISOString();
-  $("btn-csv").href = `/api/export.csv?since=${encodeURIComponent(desde)}${filtro}`;
 }
-$("hist-piscina").addEventListener("change", cargarTablaHistorial);
+$("hist-piscina").addEventListener("change", () => { cargarHistorial(); cargarTablaHistorial(); });
 
 // --- Reportes: resumen diario ------------------------------------------------
 let reporteDias = 7;
@@ -776,4 +873,4 @@ setInterval(() => {
   cargarEstado().then(cargar);
   cargarAlarmas();
 }, 10000);
-setInterval(() => { if (paginaActual === "reportes") cargarResumen(); }, 60000);
+setInterval(() => { if (paginaActual === "reportes") cargarResumen(); if (paginaActual === "historial") { cargarHistorial(); cargarTablaHistorial(); } }, 60000);

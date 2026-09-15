@@ -225,6 +225,10 @@ code { background:rgba(128,128,128,.15); padding:.15em .4em; border-radius:.25re
 .leyenda .l-aviso i { border-color:var(--z-aviso); border-top-style:dashed; }
 .leyenda .l-crit  i { border-color:var(--z-crit);  border-top-style:dashed; }
 .leyenda .l-od i { border-color:var(--s-od); }
+.leyenda .l-banda i { border:0; height:.7em; background:var(--s-od); opacity:.25; }
+[data-grafica-h] svg { display:block; width:100%; height:150px; }
+[data-grafica-h="oxigeno_disuelto"] svg { height:230px; }
+.banda-minmax { opacity:.18; }
 #tooltip { position:fixed; pointer-events:none; background:var(--panel); color:var(--tinta);
            border:1px solid var(--borde); border-radius:.45rem; padding:.5rem .7rem;
            font-size:.78rem; line-height:1.6; box-shadow:0 2px 10px rgba(0,0,0,.18); z-index:50; }

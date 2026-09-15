@@ -684,3 +684,81 @@ def test_estados_cuenta_lecturas_de_la_ultima_hora(cliente):
     _lectura(cliente, "piscina-1", 26.1, od=5.1)
     r = cliente.get("/api/estados").json()["resumen"]
     assert r["lecturas_hora"] == 2
+
+
+# --- Serie agregada: 24 h, 7 días y rango personalizado -----------------------
+
+def _sembrar_minutos(mod, n, od=lambda i: 7.0, temp=27.5, dispositivo="p1", manip=lambda i: 0):
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    with mod.db() as con:
+        for i in range(n):
+            t = (ahora - timedelta(minutes=n - i)).isoformat()
+            con.execute(
+                "INSERT INTO lecturas (recibido_en, medido_en, dispositivo,"
+                " oxigeno_disuelto, temperatura, saturacion, payload, manipulacion)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (t, t, dispositivo, od(i), temp, 90.0, "{}", manip(i)))
+    return ahora
+
+
+def test_serie_agrega_por_cubos(cliente):
+    import main
+    from datetime import timedelta
+    ahora = _sembrar_minutos(main, 40, od=lambda i: 6.0 + (i % 10) * 0.1)
+    desde = (ahora - timedelta(minutes=40)).isoformat()
+    j = cliente.get(f"/api/serie?dispositivo=p1&desde={desde}&hasta={ahora.isoformat()}&paso=600").json()
+    assert j["paso"] == 600
+    puntos = j["puntos"]
+    # 40 lecturas de un minuto en cubos de 10 min: 4 o 5 cubos según la alineación.
+    assert 4 <= len(puntos) <= 5
+    assert sum(p["n"] for p in puntos) == 40
+    lleno = max(puntos, key=lambda p: p["n"])
+    assert lleno["n"] == 10
+    assert lleno["od_min"] == pytest.approx(6.0)
+    assert lleno["od_max"] == pytest.approx(6.9)
+    assert lleno["od"] == pytest.approx(6.45)
+    assert lleno["temp"] == pytest.approx(27.5)
+    assert "t" in lleno
+
+
+def test_serie_excluye_manipulacion_del_promedio(cliente):
+    import main
+    from datetime import timedelta
+    ahora = _sembrar_minutos(main, 10, od=lambda i: 0.3 if i < 5 else 7.0,
+                             manip=lambda i: 1 if i < 5 else 0)
+    desde = (ahora - timedelta(minutes=10)).isoformat()
+    j = cliente.get(f"/api/serie?dispositivo=p1&desde={desde}&hasta={ahora.isoformat()}&paso=3600").json()
+    puntos = j["puntos"]
+    # El 0.3 medido en aire no promedia ni cuenta como mínimo, en ningún cubo.
+    ods = [p["od"] for p in puntos if p["od"] is not None]
+    assert ods and all(od == pytest.approx(7.0) for od in ods)
+    assert all(p["od_min"] is None or p["od_min"] == pytest.approx(7.0) for p in puntos)
+    assert sum(p["manip"] for p in puntos) == 5    # pero se sabe que hubo manipulación
+
+
+def test_serie_elige_paso_automatico_para_7_dias(cliente):
+    import main
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    desde = (ahora - timedelta(days=7)).isoformat()
+    j = cliente.get(f"/api/serie?desde={desde}&hasta={ahora.isoformat()}").json()
+    # Nunca más de ~600 puntos por gráfica; para 7 días eso es ≥ 17 min por cubo.
+    assert j["paso"] >= 1000
+    assert j["paso"] % 60 == 0
+
+
+def test_serie_rechaza_rango_invertido_o_enorme(cliente):
+    from datetime import datetime, timezone, timedelta
+    ahora = datetime.now(timezone.utc)
+    r = cliente.get(f"/api/serie?desde={ahora.isoformat()}&hasta={(ahora - timedelta(hours=1)).isoformat()}")
+    assert r.status_code == 422
+    r = cliente.get(f"/api/serie?desde={(ahora - timedelta(days=400)).isoformat()}&hasta={ahora.isoformat()}")
+    assert r.status_code == 422
+
+
+def test_historial_tiene_rangos_largos_y_personalizado(cliente):
+    html = cliente.get("/").text
+    assert "/api/serie" in html
+    assert 'data-hist="24"' in html and 'data-hist="168"' in html   # 24 h y 7 días
+    assert 'id="hist-desde"' in html and 'id="hist-hasta"' in html  # personalizado

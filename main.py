@@ -508,6 +508,88 @@ def stats(dias: int = Query(default=7, ge=1, le=90), dispositivo: str = Query(de
     return {"dias": filas}
 
 
+MAX_PUNTOS_SERIE = 600
+MAX_DIAS_SERIE = 92
+
+
+@app.get("/api/serie")
+def api_serie(desde: str = Query(default=""), hasta: str = Query(default=""),
+              dispositivo: str = Query(default=""), paso: int = Query(default=0, ge=0)):
+    """
+    Lecturas agregadas en cubos de `paso` segundos: promedio, mínimo y máximo
+    de cada variable. Es lo que se grafica en rangos largos (24 h, 7 días,
+    personalizado): pedir 40.000 lecturas crudas para pintar 600 píxeles
+    tarda segundos en el celular y no aporta nada.
+
+    Las lecturas marcadas como manipulación no entran en los promedios ni en
+    los extremos, pero se cuentan en `manip` para sombrear el tramo.
+    """
+    ahora = datetime.now(timezone.utc)
+
+    def _iso(texto: str) -> datetime:
+        # En la query el "+" del huso llega como espacio; "Z" no lo entiende 3.10.
+        return datetime.fromisoformat(texto.strip().replace(" ", "+").replace("Z", "+00:00"))
+
+    try:
+        t_hasta = _iso(hasta) if hasta else ahora
+        t_desde = _iso(desde) if desde else t_hasta - timedelta(hours=24)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="desde/hasta deben ser ISO 8601")
+    if t_desde.tzinfo is None:
+        t_desde = t_desde.replace(tzinfo=timezone.utc)
+    if t_hasta.tzinfo is None:
+        t_hasta = t_hasta.replace(tzinfo=timezone.utc)
+    rango = (t_hasta - t_desde).total_seconds()
+    if rango <= 0:
+        raise HTTPException(status_code=422, detail="hasta debe ser posterior a desde")
+    if rango > MAX_DIAS_SERIE * 86400:
+        raise HTTPException(status_code=422, detail=f"rango máximo: {MAX_DIAS_SERIE} días")
+    if not paso:
+        # Cubos de minutos enteros y nunca más de MAX_PUNTOS_SERIE por gráfica.
+        paso = max(60, int(-(-rango // MAX_PUNTOS_SERIE)))
+        paso = int(-(-paso // 60)) * 60
+    paso = max(paso, 60)
+
+    sql = """
+        SELECT CAST(strftime('%s', recibido_en) / ? AS INTEGER) cubo,
+               COUNT(*) n,
+               SUM(COALESCE(manipulacion, 0)) manip,
+               AVG(CASE WHEN COALESCE(manipulacion,0)=0 THEN oxigeno_disuelto END) od,
+               MIN(CASE WHEN COALESCE(manipulacion,0)=0 THEN oxigeno_disuelto END) od_min,
+               MAX(CASE WHEN COALESCE(manipulacion,0)=0 THEN oxigeno_disuelto END) od_max,
+               AVG(CASE WHEN COALESCE(manipulacion,0)=0 THEN temperatura END) temp,
+               MIN(CASE WHEN COALESCE(manipulacion,0)=0 THEN temperatura END) temp_min,
+               MAX(CASE WHEN COALESCE(manipulacion,0)=0 THEN temperatura END) temp_max,
+               AVG(CASE WHEN COALESCE(manipulacion,0)=0 THEN saturacion END) sat,
+               MIN(CASE WHEN COALESCE(manipulacion,0)=0 THEN saturacion END) sat_min,
+               MAX(CASE WHEN COALESCE(manipulacion,0)=0 THEN saturacion END) sat_max
+        FROM lecturas
+        WHERE recibido_en >= ? AND recibido_en <= ?
+          AND (oxigeno_disuelto IS NOT NULL OR temperatura IS NOT NULL)
+    """
+    params: list = [paso, t_desde.isoformat(), t_hasta.isoformat()]
+    if dispositivo:
+        sql += " AND dispositivo = ?"
+        params.append(dispositivo)
+    sql += " GROUP BY cubo ORDER BY cubo"
+
+    def r2(v):
+        return None if v is None else round(v, 2)
+
+    puntos = []
+    with db() as con:
+        for f in con.execute(sql, params):
+            puntos.append({
+                "t": datetime.fromtimestamp(f["cubo"] * paso, tz=timezone.utc).isoformat(),
+                "n": f["n"], "manip": f["manip"] or 0,
+                "od": r2(f["od"]), "od_min": r2(f["od_min"]), "od_max": r2(f["od_max"]),
+                "temp": r2(f["temp"]), "temp_min": r2(f["temp_min"]), "temp_max": r2(f["temp_max"]),
+                "sat": r2(f["sat"]), "sat_min": r2(f["sat_min"]), "sat_max": r2(f["sat_max"]),
+            })
+    return {"desde": t_desde.isoformat(), "hasta": t_hasta.isoformat(), "paso": paso,
+            "dispositivo": dispositivo or None, "puntos": puntos}
+
+
 @app.get("/api/export.csv")
 def export_csv(since: str = Query(default=""), hasta: str = Query(default=""),
                dispositivo: str = Query(default="")):

@@ -179,11 +179,40 @@
     <!-- ===================== HISTORIAL ===================== -->
     <section data-pagina="historial" hidden>
       <div class="caja">
-        <header><h2>Lecturas recientes</h2>
+        <header><h2>Evolución</h2>
           <span style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
             <select id="hist-piscina" class="boton"></select>
-            <a id="btn-csv" href="/api/export.csv" download class="boton">⬇ Descargar CSV (30 días)</a>
+            <div class="pestanas" id="hist-rangos">
+              <button data-hist="24" class="activo">24 h</button>
+              <button data-hist="168">7 días</button>
+              <button data-hist="720">30 días</button>
+              <button data-hist="0">Personalizado</button>
+            </div>
+            <a id="btn-csv" href="/api/export.csv" download class="boton">⬇ CSV del rango</a>
           </span></header>
+        <div class="formulario" id="hist-personalizado" hidden style="margin-bottom:.6rem">
+          <div class="fila">
+            <label>Desde (hora Ecuador)<input type="datetime-local" id="hist-desde"></label>
+            <label>Hasta<input type="datetime-local" id="hist-hasta"></label>
+            <button class="boton primario" id="hist-aplicar" type="button">Aplicar</button>
+          </div>
+        </div>
+        <p class="nota" id="hist-meta">Cargando…</p>
+        <div class="graficas">
+          <div class="grafica"><header>
+              <h3><span class="punto" style="background:var(--s-od)"></span>Oxígeno disuelto (mg/L)</h3>
+              <span class="leyenda"><span class="l-od"><i></i>Promedio</span><span class="l-banda"><i></i>Mín–máx</span><span class="l-crit"><i></i>Crítico</span></span></header>
+            <div data-grafica-h="oxigeno_disuelto"></div></div>
+          <div class="graficas-secundarias">
+            <div class="grafica"><header><h3><span class="punto" style="background:var(--s-temp)"></span>Temperatura (°C)</h3></header>
+              <div data-grafica-h="temperatura"></div></div>
+            <div class="grafica"><header><h3><span class="punto" style="background:var(--s-sat)"></span>Saturación (%)</h3></header>
+              <div data-grafica-h="saturacion"></div></div>
+          </div>
+        </div>
+      </div>
+      <div class="caja">
+        <header><h2>Lecturas recientes</h2></header>
         <div class="tabla-scroll"><table>
           <thead><tr><th>Hora</th><th>Piscina</th><th>OD (mg/L)</th><th>Temp (°C)</th><th>Sat (%)</th><th></th></tr></thead>
           <tbody id="tabla"></tbody></table></div>
