@@ -19,9 +19,10 @@ Pueden correr en la misma PC (instalación completa, lo normal) o separados
 
 - **Python 3.10 o superior** — en Windows descárgalo de [python.org](https://www.python.org/downloads/)
   y marca la casilla *"Add Python to PATH"* al instalar; en macOS/Linux suele venir.
-- Los archivos del proyecto: `main.py`, `modbus.py`, `alertas.py`, `agente.py`,
-  `requirements.txt` (y `test_*.py` si quieres verificar). Cópialos en una
-  carpeta, p. ej. `sonda-webhook`.
+- Los archivos del proyecto: `main.py`, `modbus.py`, `alertas.py`, `acceso.py`,
+  `agente.py`, `requirements.txt` y la carpeta `static/` con el panel (y
+  `test_*.py` si quieres verificar). Lo más fácil: `git clone` del repositorio
+  o copiar la carpeta completa, p. ej. `sonda-webhook`.
 - El **módulo USR** configurado en modo `Modbus TCP<=>Modbus RTU`, Server,
   puerto 8899 (ya está así) y conectado a la WiFi — recuerda que **solo ve
   redes de 2.4 GHz**.
@@ -53,10 +54,12 @@ mkdir $HOME\sonda-datos
 
 Elige un token secreto (cualquier texto; en producción usa uno largo y
 aleatorio). **Sin `AUTH_TOKEN` el servidor rechaza todas las lecturas.**
+Si el panel se va a ver desde fuera de la red local (túnel, Fly), pon también
+una `PANEL_CLAVE`: el navegador la pedirá al entrar.
 
 **macOS / Linux:**
 ```bash
-DB_PATH=~/sonda-datos/readings.db AUTH_TOKEN=mi-token-secreto \
+DB_PATH=~/sonda-datos/readings.db AUTH_TOKEN=mi-token-secreto PANEL_CLAVE=mi-clave \
   ./venv/bin/uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
@@ -64,6 +67,7 @@ DB_PATH=~/sonda-datos/readings.db AUTH_TOKEN=mi-token-secreto \
 ```powershell
 $env:DB_PATH="$HOME\sonda-datos\readings.db"
 $env:AUTH_TOKEN="mi-token-secreto"
+$env:PANEL_CLAVE="mi-clave"
 .\venv\Scripts\uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
@@ -112,8 +116,8 @@ y las lecturas aparecer en el panel. Si el servidor está en la nube, cambia
 ./venv/bin/python -m pytest -q
 ```
 
-Los 71 tests deben pasar. Cubren el protocolo Modbus (con tramas reales de la
-sonda), el agente, las alarmas y la API.
+Todos los tests deben pasar (más de 150). Cubren el protocolo Modbus (con
+tramas reales de la sonda), el agente, las alarmas, el acceso y la API.
 
 ## Variables de configuración
 
@@ -122,6 +126,7 @@ sonda), el agente, las alarmas y la API.
 | Variable | Por defecto | Para qué |
 |---|---|---|
 | `AUTH_TOKEN` | — (obligatoria) | Protege el webhook y las acciones del panel |
+| `PANEL_CLAVE` | vacío | Clave para entrar al panel (recomendada si se ve desde internet) |
 | `DB_PATH` | `./readings.db` | Dónde guardar la base (ponla fuera de carpetas temporales) |
 | `TELEGRAM_TOKEN` | vacío | Token del bot de Telegram para las alarmas |
 | `TELEGRAM_CHAT_ID` | vacío | Chat que recibe las alarmas |
@@ -157,6 +162,7 @@ User=pi
 WorkingDirectory=/home/pi/sonda-webhook
 Environment=DB_PATH=/home/pi/sonda-datos/readings.db
 Environment=AUTH_TOKEN=mi-token-secreto
+Environment=PANEL_CLAVE=mi-clave
 ExecStart=/home/pi/sonda-webhook/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8001
 Restart=always
 RestartSec=5
@@ -219,6 +225,8 @@ dos terminales abiertas.
 | El agente no conecta con el módulo | IP equivocada (`SONDA_HOST`), o el módulo se cayó de la WiFi — recuerda: solo 2.4 GHz |
 | Webhook responde `401` | El `WEBHOOK_TOKEN` del agente no coincide con el `AUTH_TOKEN` del servidor |
 | Webhook responde `503` | El servidor arrancó sin `AUTH_TOKEN` |
+| El panel pide una clave que no conoces | Es `PANEL_CLAVE` del servidor; cámbiala y reinicia (las sesiones viejas caducan solas) |
+| No puedo registrar sondas ni cambiar umbrales | Sin `PANEL_CLAVE`, guarda el `AUTH_TOKEN` en Configuración → Clave de la app |
 | Panel vacío pero el agente lee bien | `WEBHOOK_URL` apunta a otro servidor/puerto; mira el buffer: si crece, no está entregando |
 | Valores absurdos (millones) | Byte order: la sonda entrega float32 **DCBA**; usa este código tal cual, no otro decodificador |
 | El módulo no aparece en la red | Reconfigura su WiFi: conéctate a su red propia, entra a `10.10.100.254` (admin/admin) |

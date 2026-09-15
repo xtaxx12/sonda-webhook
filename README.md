@@ -19,6 +19,7 @@ de la plataforma no se tocan. Esto es una copia paralela de los datos.
 fly launch --no-deploy          # si la app aún no existe
 fly volumes create datos --size 1 --region gru
 fly secrets set AUTH_TOKEN=$(openssl rand -hex 24)
+fly secrets set PANEL_CLAVE=una-clave-para-entrar-al-panel   # el panel queda público sin esto
 fly deploy
 ```
 
@@ -76,24 +77,63 @@ de `{name, value}`), así que lo más probable es que funcione sin tocar nada.
 
 ---
 
+## El panel
+
+`GET /` sirve el panel: una sola página con barra lateral y secciones
+(`#/inicio`, `#/piscinas`, `#/mapa`, `#/alarmas`, `#/historial`, `#/reportes`,
+`#/dispositivos`, `#/configuracion`). El HTML, CSS y JS viven en `static/` y
+se incrustan al servir, sin build ni dependencias. Todas las horas se
+muestran en hora de Ecuador (UTC−5), sea cual sea la zona del navegador.
+
+- **Inicio**: franja de estado calculada desde los datos, una tarjeta por
+  piscina ordenadas por urgencia, detalle de la seleccionada (valor, zona,
+  tendencia, umbrales, gráficas de 1/6/24 h, mini mapa), tabla resumen y
+  alarmas recientes.
+- **Historial**: 24 h, 7 días, 30 días o rango personalizado, con la serie
+  agregada (promedio y banda mín–máx por cubo) y CSV del rango.
+- **Reportes**: resumen diario por piscina (7 o 30 días).
+- **Dispositivos** y **Configuración**: alta de sondas, ubicación, umbrales,
+  estado de Telegram con mensaje de prueba, y tema claro/oscuro.
+
+Si defines `PANEL_CLAVE`, el panel y la API piden esa clave al entrar (sesión
+de 30 días en una cookie firmada). Sin ella, el panel es de libre acceso:
+sirve en una red local, **no** si lo expones a internet.
+
 ## Endpoints
 
 | Ruta | Qué hace |
 |---|---|
-| `GET /` | Página con la última lectura |
-| `POST /usr/webhook` | Lo que llama USR Cloud |
-| `GET /api/latest` | Última lectura con valores (JSON) |
-| `GET /api/readings?limit=100&since=ISO` | Histórico (JSON) |
+| `GET /` | El panel (o la pantalla de acceso si hay `PANEL_CLAVE`) |
+| `POST /login` · `POST /logout` | Iniciar / cerrar sesión (`{"clave": "..."}`) |
+| `GET /api/sesion` | `{protegido, activa}` |
+| `POST /usr/webhook` | Lo que llama USR Cloud o el agente |
+| `GET /api/latest?dispositivo=` | Última lectura con valores (JSON) |
+| `GET /api/readings?limit=100&since=ISO&dispositivo=` | Histórico crudo (JSON) |
+| `GET /api/serie?desde=ISO&hasta=ISO&dispositivo=&paso=s` | Serie agregada por cubos (promedio, mín, máx) |
+| `GET /api/estados` · `GET /api/estado?dispositivo=` | Estado operativo (zona, tendencia, margen) de todas / una piscina |
+| `GET /api/alarmas` | Alarmas activas e historial |
+| `GET /api/stats?dias=7&dispositivo=` | Resumen diario |
+| `GET /api/export.csv?since=&hasta=&dispositivo=` | Exportar CSV |
+| `GET/PUT/DELETE /api/dispositivos[/{nombre}]` | Sondas registradas y su ubicación |
+| `GET/PUT /api/umbrales/{nombre}` | Umbrales de alarma por piscina |
+| `GET /api/telegram` · `POST /api/telegram/prueba` | Estado del bot y mensaje de prueba |
 | `GET /api/raw?limit=5` | Payloads crudos, para depurar |
-| `GET /health` | Healthcheck |
+| `GET /health` | Healthcheck (siempre abierto) |
 | `GET /docs` | Documentación automática de la API |
+
+Las escrituras (PUT/DELETE, prueba de Telegram) exigen sesión iniciada o el
+`AUTH_TOKEN` (query `token=` o cabecera `X-Auth-Token`).
 
 ## Variables de entorno
 
 | Variable | Por defecto | Para qué |
 |---|---|---|
-| `AUTH_TOKEN` | vacío | Si la defines, exige el token en el webhook. **Ponla siempre.** |
+| `AUTH_TOKEN` | vacío | Obligatoria: sin ella el webhook responde 503. Autoriza también las escrituras del panel. |
+| `PANEL_CLAVE` | vacío | Clave para entrar al panel. **Ponla si el panel se ve desde internet.** |
 | `DB_PATH` | `/data/readings.db` | Dónde guardar la base |
+| `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` | vacío | Bot y chat que reciben las alarmas |
+| `MUDA_MIN` | `10` | Minutos sin datos antes de alarmar "sonda sin datos" |
+| `STATS_UTC_OFFSET` | `-5` | Zona horaria del resumen diario (Ecuador) |
 | `MODBUS_TCP_PORT` | vacío (apagado) | Puerto TCP para que el módulo USR se conecte directo (sin nube) |
 | `MODBUS_INTERVALO` | `60` | Segundos entre sondeos Modbus |
 | `MODBUS_REGISTRO` | vacío | Texto que debe contener el paquete de registro del módulo (su SN). **Ponla en producción.** |

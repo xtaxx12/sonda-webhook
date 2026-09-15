@@ -125,6 +125,7 @@ const TITULOS = {
   configuracion: ["Configuración", "Umbrales, clave y apariencia"],
 };
 let paginaActual = "";
+let inicial = Promise.resolve();   // primera carga de la finca: las páginas esperan a tener nombres y umbrales
 function paginaDeHash() {
   const p = (location.hash || "#/inicio").replace(/^#\/?/, "").split("?")[0];
   return TITULOS[p] ? p : "inicio";
@@ -140,9 +141,11 @@ function mostrarPagina() {
   window.scrollTo({ top: 0 });
   if (p === "inicio") { if (datos.length) render(); if (mapaMini) setTimeout(() => mapaMini.invalidateSize(), 50); }
   if (p === "mapa" && mapa) setTimeout(() => { mapa.invalidateSize(); ajustarMapa(mapa); }, 50);
-  if (p === "historial") { cargarHistorial(); cargarTablaHistorial(); }
-  if (p === "reportes") cargarResumen();
-  if (p === "configuracion") { $("cfg-token").value = tokenApp(); rellenarUmbrales(); }
+  inicial.then(() => {
+    if (p === "historial") { cargarHistorial(); cargarTablaHistorial(); }
+    if (p === "reportes") cargarResumen();
+    if (p === "configuracion") { $("cfg-token").value = tokenApp(); rellenarUmbrales(); cargarTelegram(); }
+  });
 }
 addEventListener("hashchange", mostrarPagina);
 
@@ -875,6 +878,22 @@ $("form-umbrales").addEventListener("submit", async ev => {
   mensaje("umb-mensaje", `Umbrales de «${nombreDe(nombre)}»: aviso < ${aviso}, crítico < ${critico} mg/L.`, "ok");
   cargarFinca(); cargarEstado().then(cargar);
 });
+async function cargarTelegram() {
+  let j;
+  try { j = await (await fetch("/api/telegram")).json(); } catch (e) { return; }
+  const el = $("telegram-estado");
+  el.textContent = j.configurado ? "configurado" : "sin configurar";
+  el.className = "pill " + (j.configurado ? "resuelta" : "gris");
+  $("btn-telegram").disabled = !j.configurado;
+}
+$("btn-telegram").addEventListener("click", async () => {
+  mensaje("telegram-mensaje", "Enviando…", "");
+  let r;
+  try { r = await fetchAuth("/api/telegram/prueba", { method: "POST" }); } catch (e) { return; }
+  if (!r.ok) { mensaje("telegram-mensaje", (await r.json()).detail || "No se pudo enviar.", "error"); return; }
+  const j = await r.json();
+  mensaje("telegram-mensaje", j.enviado ? "Mensaje enviado: revisa Telegram." : "Telegram rechazó el envío: revisa token y chat id.", j.enviado ? "ok" : "error");
+});
 $("form-token").addEventListener("submit", ev => {
   ev.preventDefault();
   try { localStorage.setItem("token_panel", $("cfg-token").value.trim()); } catch (e) {}
@@ -883,9 +902,9 @@ $("form-token").addEventListener("submit", ev => {
 
 // --- Arranque ----------------------------------------------------------------
 iniciarMapas();
-mostrarPagina();
 cargarSesion();
-cargarFinca().then(() => { cargarDispositivos(); cargarEstado().then(cargar); cargarAlarmas(); });
+inicial = cargarFinca().then(() => { cargarDispositivos(); cargarEstado().then(cargar); cargarAlarmas(); });
+mostrarPagina();
 setInterval(() => {
   cargarFinca().then(cargarDispositivos);   // el mapa necesita las zonas ya cargadas
   cargarEstado().then(cargar);

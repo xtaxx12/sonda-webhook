@@ -341,6 +341,27 @@ def api_sesion(request: Request):
     return {"protegido": bool(PANEL_CLAVE), "activa": _sesion_activa(request)}
 
 
+def _telegram_configurado() -> bool:
+    return bool(os.environ.get("TELEGRAM_TOKEN", "").strip()
+                and os.environ.get("TELEGRAM_CHAT_ID", "").strip())
+
+
+@app.get("/api/telegram")
+def api_telegram():
+    return {"configurado": _telegram_configurado()}
+
+
+@app.post("/api/telegram/prueba")
+def api_telegram_prueba(request: Request, token: str = Query(default="")):
+    """Manda un mensaje de prueba al chat configurado. Exige sesión o token."""
+    _exigir_escritura(request, token)
+    if not _telegram_configurado():
+        raise HTTPException(status_code=503, detail="TELEGRAM_TOKEN y TELEGRAM_CHAT_ID no están configurados en el servidor")
+    hora = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=UTC_OFFSET_HORAS))).strftime("%d/%m %H:%M")
+    ok = alertas.notificar_telegram(f"✅ Mensaje de prueba del panel de la camaronera ({hora}). Las alarmas llegarán a este chat.")
+    return {"enviado": bool(ok)}
+
+
 # --- Endpoints ---------------------------------------------------------------
 
 @app.on_event("startup")

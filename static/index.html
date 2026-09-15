@@ -284,6 +284,16 @@
         </form>
       </div>
       <div class="caja">
+        <header><h2>Alarmas por Telegram</h2><span id="telegram-estado" class="pill gris">comprobando…</span></header>
+        <p class="nota">Las alarmas (oxígeno bajo, crítico, sonda sin datos) se envían al chat configurado con
+          <code>TELEGRAM_TOKEN</code> y <code>TELEGRAM_CHAT_ID</code> en el servidor. Para crear el bot: habla con @BotFather en Telegram,
+          copia el token, escribe al bot y obtén tu chat id en <code>getUpdates</code>.</p>
+        <div class="fila" style="margin-top:.6rem;display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+          <button class="boton" id="btn-telegram" type="button">✈ Enviar mensaje de prueba</button>
+          <span class="mensaje" id="telegram-mensaje"></span>
+        </div>
+      </div>
+      <div class="caja">
         <header><h2>Apariencia</h2></header>
         <label class="tema"><input type="checkbox" id="tema-oscuro-2"> Modo oscuro (por defecto sigue al sistema)</label>
       </div>

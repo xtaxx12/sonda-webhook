@@ -828,3 +828,32 @@ def test_webhook_y_health_siguen_abiertos_con_clave(protegido):
     assert protegido.get("/health").status_code == 200
     r = protegido.post("/usr/webhook?token=prueba", json={"deviceName": "p1", "Temperature": 26.0})
     assert r.status_code == 200
+
+
+# --- Telegram desde Configuración ---------------------------------------------
+
+def test_telegram_estado_sin_configurar(cliente, monkeypatch):
+    monkeypatch.delenv("TELEGRAM_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert cliente.get("/api/telegram").json() == {"configurado": False}
+    # Sin bot configurado, la prueba no puede enviarse.
+    r = cliente.post("/api/telegram/prueba?token=prueba")
+    assert r.status_code == 503
+
+
+def test_telegram_prueba_envia_mensaje(cliente, monkeypatch):
+    import main
+    monkeypatch.setenv("TELEGRAM_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    enviados = []
+    monkeypatch.setattr(main.alertas, "notificar_telegram", lambda texto: enviados.append(texto) or True)
+    assert cliente.get("/api/telegram").json() == {"configurado": True}
+    assert cliente.post("/api/telegram/prueba").status_code == 401     # exige token o sesión
+    r = cliente.post("/api/telegram/prueba?token=prueba")
+    assert r.status_code == 200 and r.json()["enviado"] is True
+    assert len(enviados) == 1 and "prueba" in enviados[0].lower()
+
+
+def test_configuracion_tiene_telegram(cliente):
+    html = cliente.get("/").text
+    assert 'id="btn-telegram"' in html and "/api/telegram" in html
