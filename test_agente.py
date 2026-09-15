@@ -227,3 +227,20 @@ def test_fallo_queda_registrado_y_se_envia(tmp_path):
     assert cuerpo["error"] == "sonda sin respuesta (timeout)"
     assert "Temperature" not in cuerpo
     assert cuerpo["deviceName"] and cuerpo["time"]
+
+
+def test_construir_peticion_esclavo_distinto():
+    # Esclavo 5, fc 03, 6 registros. El MBAP y el PDU deben llevar el 5.
+    trama = construir_peticion(esclavo=5)
+    assert trama == bytes.fromhex("000100000006050300000006")
+
+
+def test_leer_sonda_esclavo_configurable():
+    """El agente puede consultar una sonda en otra dirección Modbus."""
+    import struct as _s
+    datos = _s.pack("<fff", 7.62, 25.54, 93.87)
+    # Respuesta del esclavo 5.
+    respuesta = bytes([0x00, 0x05, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x03, 0x0c]) + datos
+    puerto = _modulo_falso(respuesta)
+    campos = leer_sonda("127.0.0.1", puerto, timeout=3, esclavo=5)
+    assert campos["oxigeno_disuelto"] == pytest.approx(7.62, abs=0.01)

@@ -53,14 +53,18 @@ def parsear_respuesta(datos: bytes):
     return {"oxigeno_disuelto": od, "temperatura": temp, "saturacion": sat}
 
 
-def leer_sonda(host: str, puerto: int, timeout: float = 6.0) -> dict:
+def leer_sonda(host: str, puerto: int, timeout: float = 6.0, esclavo: int = 1) -> dict:
     """
     Consulta la sonda una vez. Lanza TimeoutError si no contesta
     (el equivalente al err:1 de USR) y ValueError si la trama no es válida.
+
+    `esclavo` es la dirección Modbus de la sonda (1 por defecto). Si la sonda
+    de una piscina está configurada con otra dirección, el módulo conecta pero
+    la sonda ignora las preguntas dirigidas a otro esclavo -> timeout.
     """
     with socket.create_connection((host, puerto), timeout=timeout) as s:
         s.settimeout(timeout)
-        s.sendall(construir_peticion())
+        s.sendall(construir_peticion(esclavo=esclavo))
         datos = b""
         while len(datos) < 21:
             trozo = s.recv(256)
@@ -194,6 +198,7 @@ def enviar_pendientes(ruta: str, url: str, token: str, timeout: float = 5.0) -> 
 def bucle():
     host = os.environ.get("SONDA_HOST", "192.168.3.157")
     puerto = int(os.environ.get("SONDA_PORT", "8899"))
+    esclavo = int(os.environ.get("SONDA_ESCLAVO", "1"))
     url = os.environ.get("WEBHOOK_URL", "").strip()
     token = os.environ.get("WEBHOOK_TOKEN", "").strip()
     intervalo = float(os.environ.get("INTERVALO", "15"))
@@ -204,13 +209,13 @@ def bucle():
         sys.exit("Define WEBHOOK_URL (p. ej. https://TU-APP.fly.dev/usr/webhook)")
 
     preparar_buffer(buffer_db)
-    print(f"agente: sonda {host}:{puerto}, cada {intervalo:g}s -> {url}")
+    print(f"agente: sonda {host}:{puerto} (esclavo {esclavo}), cada {intervalo:g}s -> {url}")
     print(f"agente: buffer en {buffer_db}")
 
     while True:
         marca = time.monotonic()
         try:
-            campos = leer_sonda(host, puerto)
+            campos = leer_sonda(host, puerto, esclavo=esclavo)
             if not coherencia(campos["oxigeno_disuelto"], campos["temperatura"],
                               campos["saturacion"]):
                 print(f"agente: AVISO lectura incoherente {campos} — se guarda igual, "
